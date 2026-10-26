@@ -47,7 +47,7 @@ const iso = (at: number) => new Date(at).toISOString()
 
 const LOGO = `<svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="18" r="4.5" fill="currentColor"/><path d="M8.5 25.5a10.6 10.6 0 0 1 0-15M23.5 10.5a10.6 10.6 0 0 1 0 15M4.6 29a16 16 0 0 1 0-22M27.4 7a16 16 0 0 1 0 22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>`
 
-export type Ctx = { origin: string; user?: { email: string; premium: boolean }; accounts?: boolean }
+export type Ctx = { origin: string; user?: { email: string; premium: boolean }; accounts?: boolean; coinpay?: boolean }
 type LayoutOptions = { title: string; description: string; path: string; body: string; ctx: Ctx; noindex?: boolean; app?: boolean; map?: boolean; bodyClass?: string; jsonLd?: unknown }
 
 function layout(o: LayoutOptions): string {
@@ -288,7 +288,7 @@ export function aboutPage(ctx: Ctx, price: string): string {
   <li>No ads. No selling your location. The map, radio and one alert place need no account at all</li>
 </ul>
 <h2>Accounts</h2>
-<p>Sign in with just your email (a one-time link, no password) to post, comment and share photos and videos, and to keep Premium and your alert places on every device. We email you sign-in links, Premium receipts and, only if you leave the box ticked, a few updates a year.</p>
+<p>Sign in with CoinPay, or with just your email (a one-time link, no password), to post, comment and share photos and videos, and to keep Premium and your alert places on every device. We email you sign-in links, Premium receipts and, only if you leave the box ticked, a few updates a year.</p>
 <h2>Premium: ${esc(price)} once, for life</h2>
 <ul class="ticks">
   <li>Alerts for up to 25 places (home, work, school, family), each up to 50 miles</li>
@@ -382,6 +382,7 @@ export function signinPage(ctx: Ctx, o: { next: string; error?: string; sent?: s
 <p class="lede">Just your email: we send you a one-time link. No password.</p>
 <p class="muted">An account keeps Premium, your alert places and your community name on every device, and lets you post, comment and share photos and videos.</p>
 ${o.error ? `<p class="error">${esc(o.error)}</p>` : ''}
+${ctx.coinpay ? `<p><a class="btn coinpay" href="/auth/coinpay/start?next=${esc(encodeURIComponent(o.next))}&amp;news=1">Sign in with CoinPay</a></p><p class="or muted">or with your email</p>` : ''}
 <form method="post" action="/signin" class="signin">
   <input type="hidden" name="next" value="${esc(o.next)}">
   <label>Email<input type="email" name="email" required autocomplete="email" inputmode="email" value="${esc(o.email ?? '')}" placeholder="you@example.com"></label>
@@ -399,7 +400,7 @@ export function confirmSigninPage(ctx: Ctx, o: { token: string; next: string; ok
   return layout({ title: 'Sign in · resident.alerts', description: 'Finish signing in.', path: '/signin', noindex: true, body, ctx })
 }
 
-export function accountPage(ctx: Ctx, o: { email: string; premium: boolean; since: number | null; news: boolean; places: number; price: string; flash?: string; error?: string }): string {
+export function accountPage(ctx: Ctx, o: { email: string; verified: boolean; suggestEmail: string; coinpay: boolean; coinpayOn: boolean; premium: boolean; since: number | null; news: boolean; places: number; price: string; flash?: string; error?: string }): string {
   const body = `<h1>Your account</h1>
 ${o.flash ? `<p class="ok">${esc(o.flash)}</p>` : ''}${o.error ? `<p class="error">${esc(o.error)}</p>` : ''}
 <p class="lede">${esc(o.email)}</p>
@@ -416,11 +417,19 @@ ${o.flash ? `<p class="ok">${esc(o.flash)}</p>` : ''}${o.error ? `<p class="erro
 </section>
 <section class="card">
   <h2>Email</h2>
-  <form method="post" action="/account"><input type="hidden" name="action" value="news">
+  ${o.verified
+    ? `<form method="post" action="/account"><input type="hidden" name="action" value="news">
     <label class="check"><input type="checkbox" name="news" value="1"${o.news ? ' checked' : ''}> Occasional updates about resident.alerts</label>
     <button class="btn ghost">Save</button>
-  </form>
+  </form>`
+    : `<p>You signed in with CoinPay. Add your email for receipts, sign-in links, and to keep this account if you ever lose CoinPay access. We send a link to confirm it.</p>
+  <form method="post" action="/account" class="signin"><input type="hidden" name="action" value="email">
+    <input type="email" name="email" required autocomplete="email" value="${esc(o.suggestEmail)}" placeholder="you@example.com" aria-label="Email">
+    <label class="check"><input type="checkbox" name="news" value="1" checked> Occasional updates about resident.alerts</label>
+    <button class="btn primary">Confirm my email</button>
+  </form>`}
 </section>
+${o.coinpayOn ? `<section class="card"><h2>CoinPay</h2>${o.coinpay ? '<p>✓ Connected. You can sign in with CoinPay.</p>' : '<p>Connect your CoinPay account to sign in with it, without waiting for an email.</p><p><a class="btn coinpay" href="/auth/coinpay/start?next=/account">Connect CoinPay</a></p>'}</section>` : ''}
 <p class="row wrap"><form method="post" action="/signout"><button class="btn">Sign out</button></form></p>
 <details class="danger"><summary>Delete my account</summary>
   <form method="post" action="/account"><input type="hidden" name="action" value="delete"><label class="check"><input type="checkbox" name="sure" value="1"> Yes, delete my email, saved places and Premium on this account</label><button class="btn">Delete</button></form>

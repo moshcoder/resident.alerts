@@ -14,7 +14,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { cleanPlaces, type Place } from './db.js'
 import { hashKey, KEY_SHAPE, type PremiumConfig } from './premium.js'
 
-export type User = { id: string; email: string; created_at: number; news: number; places: Place[]; banned: number }
+export type User = { id: string; email: string; created_at: number; news: number; places: Place[]; banned: number; unverified_email: string | null }
 export type MailConfig = { apiKey: string; from: string } | null
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex')
@@ -24,7 +24,10 @@ export const LINK_MS = 20 * 60_000
 export const SESSION_MS = 180 * 86_400_000
 
 type Row = Record<string, any>
-const toUser = (r: Row): User => ({ id: r.id, email: r.email, created_at: r.created_at, news: r.news, places: JSON.parse(r.places || '[]'), banned: r.banned })
+const toUser = (r: Row): User => ({ id: r.id, email: r.email, created_at: r.created_at, news: r.news, places: JSON.parse(r.places || '[]'), banned: r.banned, unverified_email: r.unverified_email ?? null })
+/** Accounts made by CoinPay sign-in have no verified email yet; their `email` is this placeholder. */
+export const placeholderEmail = (sub: string) => `coinpay:${sub}`
+export const hasEmail = (u: Pick<User, 'email'>) => !u.email.startsWith('coinpay:')
 
 export class Accounts {
   readonly admins: Set<string>
@@ -36,7 +39,13 @@ export class Accounts {
       CREATE INDEX IF NOT EXISTS login_links_email ON login_links(email, created_at);
       CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS user_licenses (user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, license_hash TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user_id, license_hash));
+      CREATE TABLE IF NOT EXISTS user_identities (provider TEXT NOT NULL, sub TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, email TEXT, created_at INTEGER NOT NULL, PRIMARY KEY (provider, sub));
     `)
+    // 0.5.0: CoinPay sign-in (unverified email kept aside) and "add your email" links.
+    const ucols = (db.query('PRAGMA table_info(users)').all() as Row[]).map((c) => c.name)
+    if (!ucols.includes('unverified_email')) db.exec('ALTER TABLE users ADD COLUMN unverified_email TEXT')
+    const lcols = (db.query('PRAGMA table_info(login_links)').all() as Row[]).map((c) => c.name)
+    if (!lcols.includes('attach_user')) db.exec('ALTER TABLE login_links ADD COLUMN attach_user TEXT')
   }
 
   // ---- links + sessions -----------------------------------------------------------
@@ -44,9 +53,10 @@ export class Accounts {
   linksSince(email: string, sinceMs: number): number {
     return (this.db.query('SELECT COUNT(*) AS n FROM login_links WHERE email = ? AND created_at >= ?').get(email, sinceMs) as Row).n
   }
-  newLink(email: string, news: boolean): string {
+  /** A sign-in link. With `attachUser`, opening it proves the email for that (CoinPay-only) account instead. */
+  newLink(email: string, news: boolean, attachUser?: string): string {
     const token = rand()
-    this.db.query('INSERT INTO login_links (hash, email, news, created_at) VALUES (?, ?, ?, ?)').run(sha(token), email.toLowerCase(), news ? 1 : 0, this.now())
+    this.db.query('INSERT INTO login_links (hash, email, news, created_at, attach_user) VALUES (?, ?, ?, ?, ?)').run(sha(token), email.toLowerCase(), news ? 1 : 0, this.now(), attachUser ?? null)
     this.db.query('DELETE FROM login_links WHERE created_at < ?').run(this.now() - 7 * 86_400_000)
     return token
   }
@@ -57,9 +67,20 @@ export class Accounts {
   /** Spend a link: the account (made on first sign-in), or null if it is used up or old. */
   takeLink(token: string): User | null {
     const h = sha(token)
-    const r = this.db.query('SELECT email, news, created_at, used_at FROM login_links WHERE hash = ?').get(h) as Row | null
+    const r = this.db.query('SELECT email, news, created_at, used_at, attach_user FROM login_links WHERE hash = ?').get(h) as Row | null
     if (!r || r.used_at || this.now() - r.created_at > LINK_MS) return null
     if (this.db.query('UPDATE login_links SET used_at = ? WHERE hash = ? AND used_at IS NULL').run(this.now(), h).changes !== 1) return null
+    const attach = r.attach_user ? this.user(r.attach_user) : null
+    if (attach && !hasEmail(attach)) {
+      // The email is proven now. If it already has an account, the CoinPay one folds into it.
+      const owner = this.byEmail(r.email)
+      if (owner) {
+        this.mergeInto(attach.id, owner.id)
+        return owner.banned ? null : this.user(owner.id)
+      }
+      this.db.query('UPDATE users SET email = ?, news = ?, unverified_email = NULL WHERE id = ?').run(r.email, r.news ? 1 : 0, attach.id)
+      return this.user(attach.id)
+    }
     const u = this.ensureUser(r.email, Boolean(r.news))
     return u.banned ? null : u
   }
@@ -142,13 +163,66 @@ export class Accounts {
     this.db.query('DELETE FROM sessions WHERE user_id = ?').run(id)
   }
 
-  /** Who asked for updates, for the newsletter (CSV, admin only). */
+  // ---- CoinPay identities ------------------------------------------------------------
+
+  byIdentity(provider: string, sub: string): User | null {
+    const r = this.db.query('SELECT u.* FROM user_identities i JOIN users u ON u.id = i.user_id WHERE i.provider = ? AND i.sub = ?').get(provider, sub) as Row | null
+    return r ? toUser(r) : null
+  }
+  identities(userId: string): { provider: string; email: string | null }[] {
+    return this.db.query('SELECT provider, email FROM user_identities WHERE user_id = ?').all(userId) as any
+  }
+  /**
+   * CoinPay said who this is. Accounts are matched by CoinPay's `sub`, never by
+   * email: CoinPay does not verify emails, so matching on one would let anyone
+   * who typed your address into CoinPay into your account here.
+   */
+  signInWithCoinPay(p: { sub: string; email: string | null }, linkUser?: string | null): { user: User; created: boolean } | { error: string } {
+    const known = this.byIdentity('coinpay', p.sub)
+    if (linkUser) {
+      if (known && known.id !== linkUser) {
+        if (hasEmail(known)) return { error: 'That CoinPay account is already connected to another resident.alerts account.' }
+        this.mergeInto(known.id, linkUser)
+      }
+      this.db.query('INSERT OR REPLACE INTO user_identities (provider, sub, user_id, email, created_at) VALUES (?, ?, ?, ?, ?)').run('coinpay', p.sub, linkUser, p.email, this.now())
+      const u = this.user(linkUser)
+      return u ? { user: u, created: false } : { error: 'Sign in again.' }
+    }
+    if (known) return known.banned ? { error: 'This account is closed.' } : { user: known, created: false }
+    const id = rand(8)
+    this.db.query('INSERT INTO users (id, email, created_at, news, unverified_email, last_login_at) VALUES (?, ?, ?, 0, ?, ?)').run(id, placeholderEmail(p.sub), this.now(), p.email, this.now())
+    this.db.query('INSERT INTO user_identities (provider, sub, user_id, email, created_at) VALUES (?, ?, ?, ?, ?)').run('coinpay', p.sub, id, p.email, this.now())
+    return { user: this.user(id)!, created: true }
+  }
+  /** Fold one account into another: Premium, keys, sign-ins, places and the community name move; the first goes. */
+  mergeInto(fromId: string, toId: string) {
+    if (fromId === toId) return
+    const from = this.user(fromId)
+    const to = this.user(toId)
+    if (!from || !to) return
+    const hasResidents = Boolean(this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'residents'").get())
+    this.db.transaction(() => {
+      this.db.query('UPDATE payments SET user_id = ? WHERE user_id = ?').run(toId, fromId)
+      this.db.query('INSERT OR IGNORE INTO user_licenses (user_id, license_hash, at) SELECT ?, license_hash, at FROM user_licenses WHERE user_id = ?').run(toId, fromId)
+      this.db.query('UPDATE OR REPLACE user_identities SET user_id = ? WHERE user_id = ?').run(toId, fromId)
+      if (!to.places.length && from.places.length) this.db.query('UPDATE users SET places = ? WHERE id = ?').run(JSON.stringify(from.places), toId)
+      if (hasResidents) {
+        const toHas = this.db.query('SELECT 1 FROM residents WHERE user_id = ?').get(toId)
+        this.db.query(toHas ? 'UPDATE residents SET user_id = NULL WHERE user_id = ?' : 'UPDATE residents SET user_id = ? WHERE user_id = ?').run(...((toHas ? [fromId] : [toId, fromId]) as [string]))
+      }
+      this.db.query('DELETE FROM sessions WHERE user_id = ?').run(fromId)
+      this.db.query('DELETE FROM user_licenses WHERE user_id = ?').run(fromId)
+      this.db.query('DELETE FROM users WHERE id = ?').run(fromId)
+    })()
+  }
+
+  /** Who asked for updates, for the newsletter (CSV, admin only). Only verified emails. */
   newsCsv(): string {
-    const rows = this.db.query('SELECT email, created_at FROM users WHERE news = 1 AND banned = 0 ORDER BY created_at').all() as Row[]
+    const rows = this.db.query("SELECT email, created_at FROM users WHERE news = 1 AND banned = 0 AND email NOT LIKE 'coinpay:%' ORDER BY created_at").all() as Row[]
     return ['email,signed_up', ...rows.map((r) => `${r.email},${new Date(r.created_at).toISOString()}`)].join('\n') + '\n'
   }
   count(): { users: number; news: number } {
-    const r = this.db.query('SELECT COUNT(*) AS users, SUM(news) AS news FROM users WHERE banned = 0').get() as Row
+    const r = this.db.query("SELECT COUNT(*) AS users, SUM(CASE WHEN email NOT LIKE 'coinpay:%' THEN news ELSE 0 END) AS news FROM users WHERE banned = 0").get() as Row
     return { users: r.users, news: r.news ?? 0 }
   }
 }

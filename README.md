@@ -22,6 +22,13 @@ session cookie (writes only count with `Sec-Fetch-Site: same-origin`). An
 account holds Premium (bought while signed in, or a key attached on
 `/account`), synced alert places and the community name. Buying Premium and
 posting need an account; the map, radio and one alert place do not.
+**Sign in with CoinPay** (OAuth 2.1 code + PKCE S256, client
+`cp_14548d98fe01a7ca13c42dd0`, `COINPAY_OAUTH_CLIENT_ID/SECRET`): accounts link
+by CoinPay `sub`, never by email (CoinPay emails are unverified). A new
+CoinPay-only account keeps that email aside as unverified (not an admin, not on
+the mailing list) until it is confirmed with a one-time link from `/account`;
+confirming an email that already has an account merges the two. A signed-in
+email account can connect CoinPay from `/account`.
 `ADMIN_EMAILS` have Premium. Mail goes through Resend (`RESEND_API_KEY`,
 `MAIL_FROM`); `GET /api/v1/admin/emails` (x-admin-key) exports the opt-in list
 as CSV.

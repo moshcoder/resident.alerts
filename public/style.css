@@ -169,6 +169,8 @@ label.check { display: flex; gap: .5rem; align-items: flex-start; color: var(--t
 .card { border: 1px solid var(--line); border-radius: 12px; padding: .2rem 1rem .8rem; margin: 1rem 0; background: var(--panel); }
 .card h2 { margin-top: .8rem; }
 .danger { margin-top: 2rem; color: var(--muted); }
+.btn.coinpay { background: #1a56ff; border-color: #1a56ff; color: #fff; }
+.or { margin: .4rem 0 1rem; }
 .top nav a.acct { color: var(--text); }
 .tipform { display: flex; flex-direction: column; gap: .9rem; align-items: flex-start; }
 .tipform fieldset { border: 0; padding: 0; margin: 0; display: flex; gap: .5rem; flex-wrap: wrap; }
