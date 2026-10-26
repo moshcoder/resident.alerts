@@ -112,6 +112,15 @@ describe('accounts', () => {
     expect((await (await req('/account', { form: { action: 'key', key: comp } })).text())).toContain('Key attached')
     expect(((await (await req('/api/v1/account')).json()) as any).premium).toBe(true)
   })
+  test("a key this browser kept attaches on sign-in, and keys never sit in stored payloads", async () => {
+    const { req, signIn, comp, store } = setup()
+    await signIn('early@example.com')
+    expect((await req('/api/v1/account/key', { json: { key: 'ra_notpaidnotpaidnotpaid1' } })).status).toBe(400)
+    const r = (await (await req('/api/v1/account/key', { json: { key: comp } })).json()) as any
+    expect(r).toEqual({ attached: true, premium: true })
+    store.recordPayment({ ref: 'p1', amount_cents: 499, chain: 'SOL', raw: { metadata: { redirect_url: `https://x/premium/k/${comp}` } } })
+    expect(store.db.query('SELECT raw FROM payments WHERE ref = ?').get('p1')).toEqual({ raw: '{"metadata":{"redirect_url":"https://x/premium/k/ra_…"}}' })
+  })
   test('posting needs an account; the name follows you to a new device', async () => {
     const { req, signIn, signOut } = setup()
     expect((await req('/api/v1/residents', { json: { name: 'Tony' } })).status).toBe(401)
