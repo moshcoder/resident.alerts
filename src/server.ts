@@ -14,7 +14,8 @@ import { mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { Hono, type Context } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
-import { Accounts, createMailer, EMAIL, mailConfig, type Mailer, type User } from './accounts.js'
+import { Accounts, createMailer, EMAIL, hasEmail, mailConfig, type Mailer, type User } from './accounts.js'
+import { CoinPayOAuth, oauthConfig } from './coinpay-oauth.js'
 import { SOURCES } from './cities.js'
 import { chpSource } from './chp.js'
 import { Community } from './community.js'
@@ -57,6 +58,7 @@ export type Deps = {
   community?: Community
   accounts?: Accounts
   mail?: Mailer
+  oauth?: CoinPayOAuth
   secureCookies?: boolean
   fetch?: typeof fetch
 }
@@ -127,12 +129,13 @@ export function createApp(deps: Deps) {
     if (c.req.method !== 'GET' && c.req.method !== 'HEAD' && (c.req.header('sec-fetch-site') ?? 'same-origin') !== 'same-origin') return null
     return acc.session(getCookie(c, SESSION))
   }
+  const displayEmail = (u: User) => (hasEmail(u) ? u.email : u.unverified_email ? `${u.unverified_email} (via CoinPay)` : 'your CoinPay account')
   const accountPremium = (u: User | null) => Boolean(deps.accounts && deps.accounts.premium(deps.premium, u))
   /** Limits from a key or the signed-in account, whichever is better. */
   const limitsOf = (c: Context, key: unknown) => (accountPremium(userOf(c)) ? PREMIUM : limitsFor(deps.premium, store, key))
   const ctxOf = (c: Context): Ctx => {
     const u = userOf(c)
-    return { origin: origin(c), ...(u ? { user: { email: u.email, premium: accountPremium(u) } } : {}), accounts: Boolean(deps.accounts) }
+    return { origin: origin(c), ...(u ? { user: { email: displayEmail(u), premium: accountPremium(u) } } : {}), accounts: Boolean(deps.accounts), coinpay: Boolean(deps.oauth) }
   }
   const ip = (c: Context) => c.req.header('x-real-ip') ?? 'local'
   const page = (c: Context, html: string, status = 200) => c.html(html.replace(RING_PLACEHOLDER, ringBar(SELF, direct(c))), status as 200)
@@ -238,17 +241,40 @@ export function createApp(deps: Deps) {
       setCookie(c, SESSION, acc.newSession(u.id), { httpOnly: true, secure: deps.secureCookies ?? https(c), sameSite: 'Lax', path: '/', maxAge: 180 * 86_400 })
       return c.redirect(safeNext(f.next))
     })
+    if (deps.oauth) {
+      const oauth = deps.oauth
+      app.get('/auth/coinpay/start', (c) => {
+        const u = userOf(c)
+        return c.redirect(oauth.start({ redirectUri: `${origin(c)}/auth/coinpay/callback`, next: safeNext(c.req.query('next') ?? '/'), linkUser: u?.id ?? null, news: c.req.query('news') === '1' }))
+      })
+      app.get('/auth/coinpay/callback', async (c) => {
+        const q = c.req.query()
+        c.header('cache-control', 'no-store')
+        const fail = (message: string) => page(c, messagePage(ctxOf(c), { title: 'CoinPay sign-in did not finish', message }), 400)
+        if (q.error) return fail(q.error === 'access_denied' ? 'You cancelled on CoinPay. Nothing changed.' : 'CoinPay said no. Try again.')
+        if (!q.code || !q.state) return fail('That link is missing its code. Start again from Sign in.')
+        const out = await oauth.finish(q.code, q.state)
+        if ('error' in out) return fail(out.error)
+        const r = acc.signInWithCoinPay(out.profile, out.linkUser)
+        if ('error' in r) return fail(r.error)
+        if (out.linkUser) return c.redirect('/account?connected=1')
+        setCookie(c, SESSION, acc.newSession(r.user.id), { httpOnly: true, secure: deps.secureCookies ?? https(c), sameSite: 'Lax', path: '/', maxAge: 180 * 86_400 })
+        return c.redirect(r.created ? '/account?welcome=1' : safeNext(out.next))
+      })
+    }
     app.post('/signout', (c) => {
       acc.endSession(getCookie(c, SESSION))
       deleteCookie(c, SESSION, { path: '/' })
       return c.redirect('/')
     })
     const accountView = (c: Context, u: User, extra: { flash?: string; error?: string } = {}, status = 200) =>
-      page(c, accountPage(ctxOf(c), { email: u.email, premium: accountPremium(u), since: acc.premiumSince(u), news: Boolean(u.news), places: u.places.length, price: PRICE, ...extra }), status)
+      page(c, accountPage(ctxOf(c), { email: displayEmail(u), verified: hasEmail(u), suggestEmail: u.unverified_email ?? '', coinpay: acc.identities(u.id).some((i) => i.provider === 'coinpay'), coinpayOn: Boolean(deps.oauth), premium: accountPremium(u), since: acc.premiumSince(u), news: Boolean(u.news), places: u.places.length, price: PRICE, ...extra }), status)
     app.get('/account', (c) => {
       const u = userOf(c)
       if (!u) return c.redirect('/signin?next=/account')
-      return accountView(c, u, c.req.query('paid') ? { flash: 'Payment sent. Premium switches on as soon as CoinPay confirms it (usually a minute or two), and we email you a receipt.' } : {})
+      const q = c.req.query()
+      const flash = q.paid ? 'Payment sent. Premium switches on as soon as CoinPay confirms it (usually a minute or two), and we email you a receipt.' : q.connected ? 'CoinPay is connected: you can sign in with it from now on.' : q.welcome && !hasEmail(u) ? 'Signed in with CoinPay. Add your email below to get receipts and keep your account if you ever lose CoinPay access.' : ''
+      return accountView(c, u, flash ? { flash } : {})
     })
     app.post('/account', async (c) => {
       const u = userOf(c)
@@ -262,6 +288,16 @@ export function createApp(deps: Deps) {
           return acc.attachKey(deps.premium, u.id, String(f.key ?? ''))
             ? accountView(c, u, { flash: 'Key attached: Premium is on your account.' })
             : accountView(c, u, { error: 'That key is not valid, or its payment has not confirmed yet.' }, 400)
+        case 'email': {
+          // A CoinPay-only account proves an email with the same one-time link.
+          const email = String(f.email ?? '').trim().toLowerCase()
+          if (hasEmail(u)) return c.redirect('/account')
+          if (!EMAIL.test(email)) return accountView(c, u, { error: 'That does not look like an email address.' }, 400)
+          if (!signinLimit.allow(`ip:${ip(c)}`) || acc.linksSince(email, Date.now() - 60 * 60_000) >= 5) return accountView(c, u, { error: 'Too many emails. Try again in an hour.' }, 429)
+          const t = acc.newLink(email, f.news === '1', u.id)
+          const sent = deps.mail ? await deps.mail({ to: email, subject: 'Confirm your email for resident.alerts', text: `Confirm this email for your resident.alerts account:\n\n${origin(c)}/auth/${t}?next=/account\n\nIt works once, for 20 minutes. If you didn't ask for this, ignore it.\n` }) : false
+          return sent ? accountView(c, u, { flash: `We sent a link to ${email}. Open it to confirm.` }) : accountView(c, u, { error: 'We could not send the email just now.' }, 502)
+        }
         case 'delete':
           if (f.sure !== '1') return accountView(c, u, { error: 'Tick the box to delete your account.' }, 400)
           acc.deleteUser(u.id)
@@ -315,7 +351,8 @@ export function createApp(deps: Deps) {
     store.settlePayment(known.ref, status, payload, SETTLED.has(status))
     // A receipt, once, to the account that paid.
     const u = known.user_id && deps.accounts ? deps.accounts.user(known.user_id) : null
-    if (u && SETTLED.has(status) && !wasPaid && deps.mail) {
+    // Receipts go only to an email the buyer proved is theirs.
+    if (u && hasEmail(u) && SETTLED.has(status) && !wasPaid && deps.mail) {
       await deps.mail({ to: u.email, subject: 'resident.alerts Premium is on', text: `Thanks for buying resident.alerts Premium (${PRICE}, for life).\n\nIt is tied to your account (${u.email}): sign in on any phone or computer and it is there. Up to 25 alert places, 50 miles each, and 30 days of history.\n\n${RELAY_ORIGIN}/account\n` })
     }
     return c.json({ ok: true, status, settled: SETTLED.has(status) })
@@ -420,7 +457,7 @@ export function createApp(deps: Deps) {
   api.get('/account', (c) => {
     const u = userOf(c)
     if (!u) return c.json({ signed_in: false }, 401)
-    return c.json({ signed_in: true, email: u.email, premium: accountPremium(u), places: u.places, news: Boolean(u.news) })
+    return c.json({ signed_in: true, email: hasEmail(u) ? u.email : null, display: displayEmail(u), premium: accountPremium(u), places: u.places, news: Boolean(u.news), coinpay: deps.accounts!.identities(u.id).some((i) => i.provider === 'coinpay') })
   })
   api.put('/account/places', async (c) => {
     const u = userOf(c)
@@ -460,7 +497,9 @@ export async function serve(opts: { port?: number } = {}) {
   setInterval(() => community.prune(30), 6 * 3600_000).unref?.()
   const accounts = new Accounts(store.db, Date.now, (env.ADMIN_EMAILS ?? '').split(/[\s,]+/))
   const mail = createMailer(mailConfig(env))
-  const app = createApp({ store, sources, pusher, radio, premium: premiumConfig(env), community, accounts, mail })
+  const oc = oauthConfig(env)
+  const oauth = oc ? new CoinPayOAuth(store.db, oc) : undefined
+  const app = createApp({ store, sources, pusher, radio, premium: premiumConfig(env), community, accounts, mail, ...(oauth ? { oauth } : {}) })
   // The relay hostname, so pit.world serves the Moshpit footer template.
   startPitFooterRefresh('resident.alerts.pit.world')
   startRingFooterRefresh()
