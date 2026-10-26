@@ -31,6 +31,8 @@ export function createPusher(cfg: PushConfig, store: Store, sender: typeof webpu
         return true
       } catch (e: any) {
         const code = Number(e?.statusCode ?? 0)
+        // The push service's own words; never the endpoint (it is the device's secret).
+        console.log(`[push] ${d.id} failed: ${code || 'no status'} ${String(e?.body ?? e?.message ?? '').replace(/\s+/g, ' ').slice(0, 160)}`)
         if (code === 404 || code === 410 || d.fails >= 20) store.deleteDevice(d.endpoint)
         else store.pushed(d.id, false)
         return false
