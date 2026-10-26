@@ -134,6 +134,11 @@
   fetch('/api/v1/account').then((r) => (r.ok ? r.json() : null)).then((a) => {
     if (!a || !a.signed_in) return
     state.account = true
+    // Bought Premium before signing in? The key this browser kept joins the account.
+    if (!a.premium && premiumKey()) {
+      fetch('/api/v1/account/key', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key: premiumKey() }) })
+        .then((r) => r.json()).then((r) => { if (r.premium) { state.premium = true; state.limits = { places: 25, km: 80, hours: 720 }; showPlan(); renderPlaces() } }).catch(() => {})
+    }
     if (a.places.length) { state.places = a.places; store.set('places', state.places); drawPlaces() }
     else if (state.places.length) syncAccountPlaces()
     showPlan()

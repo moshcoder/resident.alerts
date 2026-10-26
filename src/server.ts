@@ -332,6 +332,9 @@ export function createApp(deps: Deps) {
     const state = KEY_SHAPE.test(key) ? (deps.premium.comp.has(hashKey(key)) ? 'paid' : store.licenseState(hashKey(key))) : null
     if (!state) return page(c, messagePage(ctxOf(c), { title: 'Not a key we sold', message: 'Check the link, or buy Premium again from the Premium page.' }), 404)
     c.header('cache-control', 'no-store')
+    // Signed in when the payment lands: it goes on the account too.
+    const u = userOf(c)
+    if (u && state === 'paid' && deps.accounts) deps.accounts.attachKey(deps.premium, u.id, key)
     return page(c, premiumKeyPage(ctxOf(c), { key, paid: state === 'paid', price: PRICE }))
   })
   app.post('/hooks/coinpay', async (c) => {
@@ -458,6 +461,14 @@ export function createApp(deps: Deps) {
     const u = userOf(c)
     if (!u) return c.json({ signed_in: false }, 401)
     return c.json({ signed_in: true, email: hasEmail(u) ? u.email : null, display: displayEmail(u), premium: accountPremium(u), places: u.places, news: Boolean(u.news), coinpay: deps.accounts!.identities(u.id).some((i) => i.provider === 'coinpay') })
+  })
+  // A key this browser kept from before it signed in joins the account.
+  api.post('/account/key', async (c) => {
+    const u = userOf(c)
+    if (!u || !deps.accounts) return c.json({ error: 'sign in first' }, 401)
+    const b = ((await c.req.json().catch(() => ({}))) ?? {}) as { key?: string }
+    const attached = deps.accounts.attachKey(deps.premium, u.id, String(b.key ?? ''))
+    return c.json({ attached, premium: accountPremium(u) }, attached ? 200 : 400)
   })
   api.put('/account/places', async (c) => {
     const u = userOf(c)

@@ -27,6 +27,9 @@ export type Device = {
 export type SourceState = { id: string; last_ok: number; last_error: string; last_count: number; next_at: number }
 export type Payment = { ref: string; amount_cents: number; chain: string; status: string; created_at: number; license_hash: string | null; user_id: string | null }
 
+/** CoinPay echoes our success URL, which carries the buyer's Premium key: never keep a key in a stored payload. */
+export const scrubRaw = (v: unknown) => JSON.stringify(v ?? {}).replace(/ra_[A-Za-z0-9_-]{20,40}/g, 'ra_…')
+
 export const MAX_PLACES = 25
 export const MAX_KM = 80
 
@@ -247,7 +250,7 @@ export class Store {
   // ---- Premium ------------------------------------------------------------
 
   recordPayment(p: { ref: string; amount_cents: number; chain: string; raw: unknown; license_hash?: string; user_id?: string }) {
-    this.db.query('INSERT OR IGNORE INTO payments (ref, amount_cents, chain, created_at, raw, license_hash, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)').run(p.ref, p.amount_cents, p.chain, this.now(), JSON.stringify(p.raw ?? {}), p.license_hash ?? null, p.user_id ?? null)
+    this.db.query('INSERT OR IGNORE INTO payments (ref, amount_cents, chain, created_at, raw, license_hash, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)').run(p.ref, p.amount_cents, p.chain, this.now(), scrubRaw(p.raw), p.license_hash ?? null, p.user_id ?? null)
   }
 
   payment(ref: string): Payment | null {
@@ -256,7 +259,7 @@ export class Store {
 
   /** Record the webhook's status; a settled one stamps paid_at (once, and it never un-pays). */
   settlePayment(ref: string, status: string, raw: unknown, settled: boolean) {
-    this.db.query('UPDATE payments SET status = ?, raw = ?, paid_at = CASE WHEN ? AND paid_at IS NULL THEN ? ELSE paid_at END WHERE ref = ?').run(status, JSON.stringify(raw ?? {}), settled ? 1 : 0, this.now(), ref)
+    this.db.query('UPDATE payments SET status = ?, raw = ?, paid_at = CASE WHEN ? AND paid_at IS NULL THEN ? ELSE paid_at END WHERE ref = ?').run(status, scrubRaw(raw), settled ? 1 : 0, this.now(), ref)
   }
 
   licensePaid(hash: string): boolean {
