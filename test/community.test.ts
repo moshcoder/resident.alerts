@@ -1,5 +1,5 @@
-import { describe, expect, test } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
+import { afterAll, describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SOURCES } from '../src/cities.js'
@@ -10,6 +10,11 @@ import type { Pusher } from '../src/push.js'
 import { RadioFinder } from '../src/radio.js'
 import { createApp } from '../src/server.js'
 import { inc } from './store.test.js'
+
+// Media dirs for the tests, removed afterwards (/tmp can be a small tmpfs).
+const dirs: string[] = []
+const scratch = (prefix: string) => (dirs.push(mkdtempSync(join(tmpdir(), prefix))), dirs[dirs.length - 1]!)
+afterAll(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })))
 
 const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0xff, 0xd9])
 const box = (type: string, body: Uint8Array) => {
@@ -61,7 +66,7 @@ function setup() {
   const store = new Store()
   const sent: string[] = []
   const pusher: Pusher = { enabled: true, publicKey: 'B', send: async (_d, m) => (sent.push(m.title), true) }
-  const community = new Community(store.db, store, mkdtempSync(join(tmpdir(), 'ra-media-')), { maxBytes: 10_000_000, adminKey: 'admin-secret' })
+  const community = new Community(store.db, store, scratch('ra-media-'), { maxBytes: 10_000_000, adminKey: 'admin-secret' })
   const premium = { coinpay: null, chains: ['BTC'], cents: 499, comp: new Set<string>() }
   const app = createApp({ store, sources: SOURCES, pusher, radio: new RadioFinder(), premium, community })
   const req = (path: string, o: { method?: string; json?: unknown; token?: string; headers?: Record<string, string>; ip?: string; body?: BodyInit } = {}) =>
@@ -148,7 +153,7 @@ describe('community api', () => {
   })
   test('the disk cap removes the oldest files first', async () => {
     const store = new Store()
-    const cm = new Community(store.db, store, mkdtempSync(join(tmpdir(), 'ra-cap-')), { maxBytes: 60 })
+    const cm = new Community(store.db, store, scratch('ra-cap-'), { maxBytes: 60 })
     const { resident } = cm.newResident('X', '1.1.1.1')
     const first = (await cm.addMedia(resident.id, JPEG.slice())) as any
     await cm.addMedia(resident.id, JPEG.slice())
