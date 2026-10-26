@@ -41,6 +41,8 @@ export function createMcpServer(client = new AlertsClient()): McpServer {
   )
   server.tool('get_incident', 'One incident by id, with its source and a shareable page link.', { id: z.string().min(3).max(200) }, wrap(({ id }: any) => client.incident(id)))
   server.tool('radio_near', 'Police, fire and EMS scanner feeds for the US county at a point (Broadcastify links, live status, listeners).', { lat: z.number(), lon: z.number() }, wrap(({ lat, lon }: any) => client.radio(lat, lon)))
+  server.tool('incident_comments', 'What residents said about an incident (text plus links to their photos and videos).', { id: z.string().min(3).max(200) }, wrap(({ id }: any) => client.comments(id)))
+  server.tool('area_chat', 'Recent messages in the neighborhood chat for the ~40 km area around a point.', { lat: z.number(), lon: z.number() }, wrap(({ lat, lon }: any) => client.chat(lat, lon)))
   server.tool('coverage', 'Which feeds resident.alerts reads, whether each is healthy, and how many calls each had in the last 24 hours.', {}, wrap(() => client.sources()))
   return server
 }

@@ -1,7 +1,7 @@
 // resident.alerts service worker: installs the app, keeps the shell for offline
 // use, and shows alerts. Incident data is live, so API calls are never cached.
-const CACHE = 'ra-shell-v1'
-const SHELL = ['/offline.html', '/style.css', '/app.js', '/favicon.svg', '/icon-192.png', '/manifest.webmanifest', '/vendor/leaflet.js', '/vendor/leaflet.css']
+const CACHE = 'ra-shell-v2'
+const SHELL = ['/offline.html', '/style.css', '/app.js', '/community.js', '/favicon.svg', '/icon-192.png', '/manifest.webmanifest', '/vendor/leaflet.js', '/vendor/leaflet.css']
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()))

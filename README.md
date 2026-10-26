@@ -14,6 +14,16 @@ it, and `X-Premium-Key` sends it to the API.
 - CLI + TUI: `bunx @profullstack/residentalerts near 47.61 -122.33`, `… watch 47.61 -122.33`
 - MCP: `claude mcp add residentalerts -- bunx @profullstack/residentalerts mcp`
 
+## Community
+
+Pseudonymous residents (`rt_` token + name, no email): comments on every
+incident, an area chat per ~40 km geohash cell, residents' own reports
+(unverified; push only after two other residents confirm), photos and videos.
+Photos are re-encoded in the browser (EXIF/GPS gone), MP4/MOV `udta`/`meta`
+boxes are blanked on the server, files are capped (10 MB photo, 25 MB video,
+30/day, `MEDIA_MAX_GB` total, oldest first) and served sandboxed with ranges.
+Three flags hide anything; `ADMIN_KEY` removes and bans (resident + network).
+
 ## Where the data comes from
 
 Public feeds agencies publish themselves, read every few minutes on the server
@@ -32,13 +42,16 @@ Public feeds agencies publish themselves, read every few minutes on the server
 | NWS warnings (with polygons) | US | api.weather.gov |
 | USGS earthquakes M2.5+ | world | GeoJSON |
 | NIFC current wildfires | US | WFIGS ArcGIS |
+| California Highway Patrol CAD | all of California | ASP.NET page, all 25 centers, Details postback for lat/lon |
 
 Feeds without coordinates are placed by the US Census geocoder (block
 addresses) or by intersecting the two streets' OpenStreetMap lines (Nominatim,
 one request a second, every answer cached in SQLite).
 
 **Radio:** point -> county (FCC Census Area API) -> Broadcastify's county page
--> live scanner feeds, opened in Broadcastify's own player. Live 911 *caller*
+-> live scanner feeds; ▶ opens Broadcastify's own mini player in a popup
+(their player sends `frame-ancestors 'none'` and streams use per-listener
+tokens, so it cannot play inside another site). Live 911 *caller*
 recordings are not published anywhere in the US; what apps call "911 audio" is
 dispatch radio. OpenMHz (trunked radio clips) blocks datacenter IPs and
 cross-origin browser requests behind a Cloudflare challenge, so it can't be
