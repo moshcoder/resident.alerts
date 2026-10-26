@@ -1,7 +1,7 @@
 /**
  * The resident.alerts API from anywhere: the CLI, the TUI and the MCP server
- * use this. RESIDENTALERTS_URL points it at another instance. No key: the API
- * is open.
+ * use this. RESIDENTALERTS_URL points it at another instance. The API is open;
+ * RESIDENTALERTS_KEY (a Premium key) adds history past 24 hours.
  */
 import type { Radio } from './radio.js'
 import type { Incident, Kind } from './sources.js'
@@ -24,7 +24,10 @@ export class AlertsClient {
   }
 
   private async get<T>(path: string): Promise<T> {
-    const r = await this.doFetch(`${this.base}/api/v1${path}`, { headers: { accept: 'application/json', 'user-agent': 'residentalerts-cli' }, signal: AbortSignal.timeout(20_000) })
+    const headers: Record<string, string> = { accept: 'application/json', 'user-agent': 'residentalerts-cli' }
+    // RESIDENTALERTS_KEY (a Premium key) opens history past 24 hours.
+    if (process.env.RESIDENTALERTS_KEY) headers['x-premium-key'] = process.env.RESIDENTALERTS_KEY
+    const r = await this.doFetch(`${this.base}/api/v1${path}`, { headers, signal: AbortSignal.timeout(20_000) })
     const body = (await r.json().catch(() => ({}))) as any
     if (!r.ok) throw new ApiError(body?.error ?? `HTTP ${r.status}`, r.status)
     return body as T

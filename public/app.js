@@ -28,7 +28,10 @@
     return 6371 * 2 * Math.asin(Math.min(1, Math.sqrt(h)))
   }
   const miles = (k) => (k < 0.16 ? 'nearby' : (k * 0.621371).toFixed(k < 16 ? 1 : 0) + ' mi')
-  const getJSON = async (url, opts) => {
+  const premiumKey = () => store.get('premiumKey', '')
+  const getJSON = async (url, opts = {}) => {
+    const k = premiumKey()
+    if (k) opts.headers = Object.assign({ 'x-premium-key': k }, opts.headers || {})
     const r = await fetch(url, opts)
     const body = await r.json().catch(() => ({}))
     if (!r.ok) throw new Error(body.error || 'HTTP ' + r.status)
@@ -48,6 +51,10 @@
       } catch {}
     })
   }
+  // CoinPay's success page hands us the key once the payment settles: keep it.
+  const keyEl = document.querySelector('[data-premium-key]')
+  if (keyEl) store.set('premiumKey', keyEl.dataset.premiumKey)
+
   const radioBtn = document.querySelector('[data-radio-locate]')
   if (radioBtn) {
     radioBtn.addEventListener('click', () => {
@@ -102,7 +109,28 @@
     alertKinds: new Set(store.get('alertKinds', ALL_KINDS)),
     alertSev: Number(store.get('alertSev', 2)),
     tab: 'feed',
+    premium: false,
+    limits: { places: 1, km: 5, hours: 24 },
   }
+  const PRICE = app.dataset.price || '$4.99'
+  const upsell = (what) => `${what} is Premium: ${PRICE} once, for life. <a href="/premium">Get Premium</a>`
+  function showPlan() {
+    $('plan').innerHTML = state.premium
+      ? `★ Premium: up to ${state.limits.places} places, up to 50 miles each, 30 days of history.`
+      : `Free: 1 place within 3 miles. <a href="/premium">Premium</a>, ${PRICE} once for life: up to 25 places, up to 50 miles each, and 30 days of history.`
+    for (const o of document.querySelectorAll('#hours option[data-premium]')) o.textContent = o.textContent.replace(/ ★$/, '') + (state.premium ? '' : ' ★')
+  }
+  async function checkPremium(key) {
+    if (!key) return false
+    try {
+      const r = await getJSON('/api/v1/premium/check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key }) })
+      state.premium = r.premium
+      state.limits = r.limits
+    } catch {}
+    showPlan()
+    return state.premium
+  }
+  checkPremium(premiumKey())
   const feedEl = $('feed')
   const sheet = $('sheet')
 
@@ -280,7 +308,14 @@ ${i.detail ? `<p class="muted" style="margin:.2rem 0 .6rem;font-size:.88rem">${e
     load()
   })
   $('hours').value = String(state.hours)
-  $('hours').addEventListener('change', () => { state.hours = Number($('hours').value); store.set('hours', state.hours); load() })
+  $('hours').addEventListener('change', () => {
+    if (Number($('hours').value) > 24 && !state.premium) {
+      $('hours').value = '24'
+      $('count').innerHTML = upsell('History past a day')
+      return
+    }
+    state.hours = Number($('hours').value); store.set('hours', state.hours); load()
+  })
   $('serious').checked = state.serious
   $('serious').addEventListener('change', () => { state.serious = $('serious').checked; store.set('serious', state.serious); load() })
   $('grab').addEventListener('click', () => sheet.classList.toggle('open'))
@@ -333,7 +368,7 @@ ${feeds.length ? `<ol class="feeds">${feeds.map((f) => `<li><a href="${esc(f.url
   function renderPlaces() {
     const el = $('places')
     el.innerHTML = state.places.length
-      ? state.places.map((p, n) => `<li><input type="text" value="${esc(p.name)}" data-n="${n}" data-f="name" aria-label="Place name" maxlength="40"><label><input class="km" type="number" min="0.2" max="80" step="0.1" value="${(p.km * 0.621371).toFixed(1)}" data-n="${n}" data-f="mi" aria-label="Radius in miles"> mi</label><button type="button" data-del="${n}" aria-label="Remove">×</button></li>`).join('')
+      ? state.places.map((p, n) => `<li><input type="text" value="${esc(p.name)}" data-n="${n}" data-f="name" aria-label="Place name" maxlength="40"><label><input class="km" type="number" min="0.2" max="${state.premium ? 50 : 3}" step="0.1" value="${(p.km * 0.621371).toFixed(1)}" data-n="${n}" data-f="mi" aria-label="Radius in miles"> mi</label><button type="button" data-del="${n}" aria-label="Remove">×</button></li>`).join('')
       : '<li class="empty" style="display:block">No places yet. Add one below.</li>'
     drawPlaces()
   }
@@ -380,13 +415,19 @@ ${feeds.length ? `<ol class="feeds">${feeds.map((f) => `<li><a href="${esc(f.url
     syncT = setTimeout(async () => {
       if (!state.places.length) { status('Add a place to keep alerts on.'); return }
       try {
-        await getJSON('/api/v1/devices', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ subscription: subJSON(), places: state.places, kinds: [...state.alertKinds], min_severity: state.alertSev }) })
+        await getJSON('/api/v1/devices', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ subscription: subJSON(), places: state.places, kinds: [...state.alertKinds], min_severity: state.alertSev, premium_key: premiumKey() || undefined }) })
         status('Saved.')
       } catch (e) { status('Could not save: ' + e.message) }
     }, 500)
   }
+  const roomForPlace = () => {
+    if (state.premium || state.places.length < state.limits.places) return true
+    $('push-status').innerHTML = upsell('More than one place')
+    return false
+  }
   const askPlaceName = (fallback) => (prompt('Name this place (home, work, school…)', fallback) || fallback).slice(0, 40)
   $('add-here').addEventListener('click', async () => {
+    if (!roomForPlace()) return
     status('Finding you…')
     const me = await locate(true)
     if (!me) return status('Location is blocked. Use "Add the map\'s center" instead.')
@@ -395,6 +436,7 @@ ${feeds.length ? `<ol class="feeds">${feeds.map((f) => `<li><a href="${esc(f.url
     savePlaces()
   })
   $('add-center').addEventListener('click', () => {
+    if (!roomForPlace()) return
     const c = state.map.getCenter()
     state.places.push({ name: askPlaceName('Place ' + (state.places.length + 1)), lat: +c.lat.toFixed(5), lon: +c.lng.toFixed(5), km: 1.6 })
     savePlaces()
@@ -403,7 +445,11 @@ ${feeds.length ? `<ol class="feeds">${feeds.map((f) => `<li><a href="${esc(f.url
     const n = Number(e.target.dataset.n)
     if (!state.places[n]) return
     if (e.target.dataset.f === 'name') state.places[n].name = e.target.value.trim() || 'Place'
-    if (e.target.dataset.f === 'mi') state.places[n].km = Math.min(80, Math.max(0.2, Number(e.target.value) / 0.621371))
+    if (e.target.dataset.f === 'mi') {
+      const km = Math.max(0.2, Number(e.target.value) / 0.621371)
+      if (km > state.limits.km + 0.05 && !state.premium) $('push-status').innerHTML = upsell('A radius over 3 miles')
+      state.places[n].km = Math.min(state.limits.km, km)
+    }
     savePlaces()
   })
   $('places').addEventListener('click', (e) => {
@@ -437,9 +483,18 @@ ${feeds.length ? `<ol class="feeds">${feeds.map((f) => `<li><a href="${esc(f.url
       if ((await Notification.requestPermission()) !== 'granted') return status('Notifications are blocked for this site. Allow them in your browser settings.')
       push.reg = push.reg || (await navigator.serviceWorker.ready)
       push.sub = (await push.reg.pushManager.getSubscription()) || (await push.reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64(app.dataset.vapid) }))
-      await getJSON('/api/v1/devices', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ subscription: subJSON(), places: state.places, kinds: [...state.alertKinds], min_severity: state.alertSev }) })
+      await getJSON('/api/v1/devices', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ subscription: subJSON(), places: state.places, kinds: [...state.alertKinds], min_severity: state.alertSev, premium_key: premiumKey() || undefined }) })
       setOn(true)
     } catch (e) { status(e.message || String(e)) }
+  })
+  $('key-use').addEventListener('click', async () => {
+    const key = $('key-in').value.trim()
+    if (await checkPremium(key)) {
+      store.set('premiumKey', key)
+      renderPlaces()
+      syncDevice()
+      status('★ Premium is on for this browser.')
+    } else status('That key is not valid, or its payment has not confirmed yet.')
   })
   $('push-test').addEventListener('click', async () => {
     try { await getJSON('/api/v1/devices/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: push.sub.endpoint, auth: subJSON().keys.auth }) }); status('Sent. It should arrive in a few seconds.') } catch (e) { status(e.message) }

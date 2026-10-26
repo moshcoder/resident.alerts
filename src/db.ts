@@ -1,7 +1,7 @@
 /**
  * One SQLite file: incidents we have read, the devices that asked for push
  * alerts (and the places each one cares about), what we already sent them, how
- * each source is doing, and tips paid through CoinPay.
+ * each source is doing, and Premium payments through CoinPay.
  *
  * There are no accounts. A device is its push subscription: the endpoint and
  * its keys are secret to that browser, so knowing them is the proof needed to
@@ -25,7 +25,7 @@ export type Device = {
   fails: number
 }
 export type SourceState = { id: string; last_ok: number; last_error: string; last_count: number; next_at: number }
-export type Payment = { ref: string; amount_cents: number; chain: string; status: string; created_at: number }
+export type Payment = { ref: string; amount_cents: number; chain: string; status: string; created_at: number; license_hash: string | null }
 
 export const MAX_PLACES = 25
 export const MAX_KM = 80
@@ -99,6 +99,11 @@ export class Store {
         created_at INTEGER NOT NULL, raw TEXT NOT NULL DEFAULT '{}'
       );
     `)
+    // 0.2.0: a payment can buy a Premium key (stored as its hash), paid_at once it settles.
+    const cols = (this.db.query('PRAGMA table_info(payments)').all() as Row[]).map((c) => c.name)
+    if (!cols.includes('license_hash')) this.db.exec('ALTER TABLE payments ADD COLUMN license_hash TEXT')
+    if (!cols.includes('paid_at')) this.db.exec('ALTER TABLE payments ADD COLUMN paid_at INTEGER')
+    this.db.exec('CREATE INDEX IF NOT EXISTS payments_license ON payments(license_hash)')
   }
 
   // ---- incidents ------------------------------------------------------------
@@ -237,23 +242,33 @@ export class Store {
       .run(id, r.ok ? this.now() : s.last_ok, r.ok ? '' : String(r.error ?? 'failed').slice(0, 300), r.ok ? (r.count ?? 0) : s.last_count, r.nextAt)
   }
 
-  // ---- tips ------------------------------------------------------------
+  // ---- Premium ------------------------------------------------------------
 
-  recordPayment(p: { ref: string; amount_cents: number; chain: string; raw: unknown }) {
-    this.db.query('INSERT OR IGNORE INTO payments (ref, amount_cents, chain, created_at, raw) VALUES (?, ?, ?, ?, ?)').run(p.ref, p.amount_cents, p.chain, this.now(), JSON.stringify(p.raw ?? {}))
+  recordPayment(p: { ref: string; amount_cents: number; chain: string; raw: unknown; license_hash?: string }) {
+    this.db.query('INSERT OR IGNORE INTO payments (ref, amount_cents, chain, created_at, raw, license_hash) VALUES (?, ?, ?, ?, ?, ?)').run(p.ref, p.amount_cents, p.chain, this.now(), JSON.stringify(p.raw ?? {}), p.license_hash ?? null)
   }
 
   payment(ref: string): Payment | null {
-    return (this.db.query('SELECT ref, amount_cents, chain, status, created_at FROM payments WHERE ref = ?').get(ref) as Payment | null) ?? null
+    return (this.db.query('SELECT ref, amount_cents, chain, status, created_at, license_hash FROM payments WHERE ref = ?').get(ref) as Payment | null) ?? null
   }
 
-  settlePayment(ref: string, status: string, raw: unknown) {
-    this.db.query('UPDATE payments SET status = ?, raw = ? WHERE ref = ?').run(status, JSON.stringify(raw ?? {}), ref)
+  /** Record the webhook's status; a settled one stamps paid_at (once, and it never un-pays). */
+  settlePayment(ref: string, status: string, raw: unknown, settled: boolean) {
+    this.db.query('UPDATE payments SET status = ?, raw = ?, paid_at = CASE WHEN ? AND paid_at IS NULL THEN ? ELSE paid_at END WHERE ref = ?').run(status, JSON.stringify(raw ?? {}), settled ? 1 : 0, this.now(), ref)
   }
 
-  tipsTotal(settled: Set<string>): number {
-    const rows = this.db.query('SELECT status, SUM(amount_cents) AS c FROM payments GROUP BY status').all() as Row[]
-    return rows.filter((r) => settled.has(r.status)).reduce((a, r) => a + (r.c ?? 0), 0)
+  licensePaid(hash: string): boolean {
+    return Boolean(this.db.query('SELECT 1 FROM payments WHERE license_hash = ? AND paid_at IS NOT NULL').get(hash))
+  }
+
+  /** The Premium payment behind a key: 'paid', 'pending' or null if we never sold it. */
+  licenseState(hash: string): 'paid' | 'pending' | null {
+    const r = this.db.query('SELECT MAX(paid_at IS NOT NULL) AS paid FROM payments WHERE license_hash = ?').get(hash) as Row | null
+    return r?.paid === null || r?.paid === undefined ? null : r.paid ? 'paid' : 'pending'
+  }
+
+  premiumCount(): number {
+    return (this.db.query('SELECT COUNT(DISTINCT license_hash) AS n FROM payments WHERE paid_at IS NOT NULL').get() as Row).n
   }
 }
 

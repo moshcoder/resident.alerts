@@ -1,6 +1,6 @@
 /**
  * The resident.alerts web server: the map app, incident pages, the open JSON
- * API, push registration, radio lookups, tips, and the worker that reads the
+ * API, push registration, radio lookups, Premium, and the worker that reads the
  * feeds.
  *
  * resident.alerts is a Moshpit name. Visitors on Moshpit DNS reach
@@ -14,16 +14,16 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { Hono, type Context } from 'hono'
 import { CITY_SOURCES, SOURCES, sourceById } from './cities.js'
-import { cleanKinds, cleanPlaces, Store } from './db.js'
+import { cleanKinds, cleanPlaces, MAX_PLACES, Store } from './db.js'
 import { Geocoder } from './geocode.js'
-import { aboutPage, apiPage, coveragePage, homePage, incidentPage, messagePage, radioPage, tipPage, type Ctx } from './html.js'
+import { aboutPage, apiPage, coveragePage, homePage, incidentPage, messagePage, premiumKeyPage, premiumPage, radioPage, type Ctx } from './html.js'
 import { startPitFooterRefresh } from './pit-footer.js'
 import { createPusher, pushConfig, type Pusher } from './push.js'
 import { RadioFinder } from './radio.js'
 import { ringDescriptor, startRingFooterRefresh } from './ring-footer.js'
 import { RING_PLACEHOLDER, ringBar, startRingRefresh, visitorOnMoshpit } from './ring.js'
 import { KINDS, type Kind, type Source } from './sources.js'
-import { coinpayConfig, readWebhook, SETTLED, startTip, verifyWebhook, type CoinPay } from './tips.js'
+import { FREE, hashKey, isPremium, KEY_SHAPE, limitsFor, premiumConfig, price, readWebhook, SETTLED, startPremium, verifyWebhook, type PremiumConfig } from './premium.js'
 import { VERSION } from './version.js'
 import { startWorker } from './worker.js'
 
@@ -48,7 +48,7 @@ export type Deps = {
   sources: Source[]
   pusher: Pusher
   radio: RadioFinder
-  tips: { coinpay: CoinPay | null; chains: string[] }
+  premium: PremiumConfig
   fetch?: typeof fetch
 }
 
@@ -78,10 +78,10 @@ const kindsIn = (v: unknown): Kind[] | undefined => {
 }
 
 /** Query string -> a near() call. Shared by the API and the pages. */
-export function incidentQuery(q: Record<string, string | undefined>) {
+export function incidentQuery(q: Record<string, string | undefined>, maxHours = 24 * 30) {
   const lat = numIn(q.lat, -90, 90)
   const lon = numIn(q.lon, -180, 180)
-  const hours = numIn(q.hours, 0.05, 24 * 30) ?? 24
+  const hours = Math.min(numIn(q.hours, 0.05, 24 * 30) ?? 24, maxHours)
   return {
     ...(lat !== undefined && lon !== undefined ? { lat, lon } : {}),
     km: numIn(q.km, 0.1, 500) ?? 10,
@@ -107,6 +107,9 @@ export function createApp(deps: Deps) {
   const ip = (c: Context) => c.req.header('x-real-ip') ?? 'local'
   const page = (c: Context, html: string, status = 200) => c.html(html.replace(RING_PLACEHOLDER, ringBar(SELF, direct(c))), status as 200)
   const CORS = { 'access-control-allow-origin': '*' }
+  /** A Premium key from the API (header) or a form/body field. */
+  const keyOf = (c: Context) => c.req.header('x-premium-key') ?? (c.req.header('authorization') ?? '').replace(/^Bearer\s+/i, '')
+  const PRICE = price(deps.premium.cents)
 
   app.use('*', async (c, next) => {
     // Forms only from our own pages: a cross-site POST is refused before it reaches a handler.
@@ -121,7 +124,7 @@ export function createApp(deps: Deps) {
   app.get('/.well-known/openwebring.json', (c) => c.json(ringDescriptor(), 200, CORS))
   app.get('/robots.txt', (c) => c.text(`User-agent: *\nAllow: /\nDisallow: /api/\nSitemap: ${RELAY_ORIGIN}/sitemap.xml\n`))
   app.get('/sitemap.xml', (c) => {
-    const paths = ['/', '/radio', '/coverage', '/about', '/api', '/tip']
+    const paths = ['/', '/radio', '/coverage', '/about', '/api', '/premium']
     const recent = store.near({ sinceMs: Date.now() - 2 * 86_400_000, minSeverity: 3, limit: 500 })
     const urls = [...paths.map((p) => `${RELAY_ORIGIN}${p}`), ...recent.map((i) => `${RELAY_ORIGIN}/i/${encodeURIComponent(i.id)}`)]
     return c.body(`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls.map((u) => `<url><loc>${u.replace(/&/g, '&amp;')}</loc></url>`).join('')}</urlset>`, 200, { 'content-type': 'application/xml' })
@@ -147,7 +150,7 @@ export function createApp(deps: Deps) {
   // ---- pages -------------------------------------------------------------------
 
   app.get('/', (c) =>
-    page(c, homePage(ctxOf(c), { latest: store.near({ sinceMs: Date.now() - 24 * 3600_000, minSeverity: 3, limit: 25, kinds: ['police', 'fire', 'traffic', 'weather', 'quake', 'hazard'] }), push: pusher.enabled, vapid: pusher.publicKey, sources: deps.sources.length })),
+    page(c, homePage(ctxOf(c), { latest: store.near({ sinceMs: Date.now() - 24 * 3600_000, minSeverity: 3, limit: 25, kinds: ['police', 'fire', 'traffic', 'weather', 'quake', 'hazard'] }), push: pusher.enabled, vapid: pusher.publicKey, sources: deps.sources.length, price: PRICE })),
   )
   app.get('/i/:id', (c) => {
     const i = store.incident(c.req.param('id'))
@@ -156,7 +159,7 @@ export function createApp(deps: Deps) {
     return page(c, incidentPage(ctxOf(c), { i, nearby, source: sourceById(i.source) }))
   })
   app.get('/coverage', (c) => page(c, coveragePage(ctxOf(c), { sources: deps.sources, states: store.sourceStates(), counts: store.counts(Date.now() - 24 * 3600_000), devices: store.countDevices() })))
-  app.get('/about', (c) => page(c, aboutPage(ctxOf(c))))
+  app.get('/about', (c) => page(c, aboutPage(ctxOf(c), PRICE)))
   app.get('/api', (c) => page(c, apiPage(ctxOf(c))))
   app.get('/radio', async (c) => {
     const lat = numIn(c.req.query('lat'), -90, 90)
@@ -171,21 +174,31 @@ export function createApp(deps: Deps) {
     }
   })
 
-  // ---- tips ----------------------------------------------------------------------
+  // ---- Premium ---------------------------------------------------------------------
 
-  app.get('/tip', (c) => page(c, tipPage(ctxOf(c), { chains: deps.tips.chains, enabled: Boolean(deps.tips.coinpay), thanks: c.req.query('thanks') === '1' })))
-  app.post('/tip', async (c) => {
+  const premiumView = (c: Context, error?: string, status = 200) => page(c, premiumPage(ctxOf(c), { chains: deps.premium.chains, enabled: Boolean(deps.premium.coinpay), price: PRICE, ...(error ? { error } : {}) }), status)
+  app.get('/premium', (c) => premiumView(c))
+  app.get('/tip', (c) => c.redirect('/premium', 301))
+  app.post('/premium', async (c) => {
     const f = (await c.req.parseBody()) as Record<string, string>
     try {
-      const out = await startTip(deps.tips, store, { dollars: Number(f.amount), chain: String(f.chain ?? ''), successUrl: `${RELAY_ORIGIN}/tip?thanks=1`, cancelUrl: `${RELAY_ORIGIN}/tip` }, deps.fetch)
+      const out = await startPremium(deps.premium, store, { chain: String(f.chain ?? ''), successUrl: (key) => `${RELAY_ORIGIN}/premium/k/${key}`, cancelUrl: `${RELAY_ORIGIN}/premium` }, deps.fetch)
       return c.redirect(out.checkoutUrl)
     } catch (e) {
-      return page(c, tipPage(ctxOf(c), { chains: deps.tips.chains, enabled: Boolean(deps.tips.coinpay), error: e instanceof Error ? e.message : String(e) }), 400)
+      return premiumView(c, e instanceof Error ? e.message : String(e), 400)
     }
+  })
+  // Where CoinPay sends the buyer back: the key, once the payment has settled.
+  app.get('/premium/k/:key', (c) => {
+    const key = c.req.param('key')
+    const state = KEY_SHAPE.test(key) ? (deps.premium.comp.has(hashKey(key)) ? 'paid' : store.licenseState(hashKey(key))) : null
+    if (!state) return page(c, messagePage(ctxOf(c), { title: 'Not a key we sold', message: 'Check the link, or buy Premium again from the Premium page.' }), 404)
+    c.header('cache-control', 'no-store')
+    return page(c, premiumKeyPage(ctxOf(c), { key, paid: state === 'paid', price: PRICE }))
   })
   app.post('/hooks/coinpay', async (c) => {
     const raw = await c.req.text()
-    const cp = deps.tips.coinpay
+    const cp = deps.premium.coinpay
     if (!cp || !verifyWebhook(cp.webhookSecret, raw, c.req.header('x-coinpay-signature') ?? c.req.header('coinpay-signature'))) return c.json({ error: 'bad signature' }, 401)
     let payload: unknown
     try {
@@ -196,7 +209,7 @@ export function createApp(deps: Deps) {
     const { ref, status } = readWebhook(payload)
     const known = ref ? store.payment(String(ref)) : null
     if (!known) return c.json({ ok: true, ignored: 'unknown payment' })
-    store.settlePayment(known.ref, status, payload)
+    store.settlePayment(known.ref, status, payload, SETTLED.has(status))
     return c.json({ ok: true, status, settled: SETTLED.has(status) })
   })
 
@@ -211,7 +224,8 @@ export function createApp(deps: Deps) {
   })
 
   api.get('/incidents', (c) => {
-    const q = incidentQuery(c.req.query())
+    // History past a day is Premium; without a key the window quietly stops at 24 hours.
+    const q = incidentQuery(c.req.query(), limitsFor(deps.premium, store, keyOf(c)).hours)
     const list = store.near(q)
     return c.json({ count: list.length, incidents: list }, 200, { 'cache-control': 'public, max-age=20' })
   })
@@ -244,8 +258,13 @@ export function createApp(deps: Deps) {
   })
 
   api.get('/vapid', (c) => c.json({ enabled: pusher.enabled, publicKey: pusher.publicKey }))
+  api.post('/premium/check', async (c) => {
+    const b = ((await c.req.json().catch(() => ({}))) ?? {}) as { key?: string }
+    const premium = isPremium(deps.premium, store, b.key)
+    return c.json({ premium, limits: premium ? limitsFor(deps.premium, store, b.key) : FREE, price: PRICE })
+  })
 
-  type DeviceBody = { subscription?: { endpoint?: string; keys?: { p256dh?: string; auth?: string } }; endpoint?: string; auth?: string; places?: unknown; kinds?: unknown; min_severity?: unknown }
+  type DeviceBody = { subscription?: { endpoint?: string; keys?: { p256dh?: string; auth?: string } }; endpoint?: string; auth?: string; places?: unknown; kinds?: unknown; min_severity?: unknown; premium_key?: string }
   const body = async (c: Context) => ((await c.req.json().catch(() => ({}))) ?? {}) as DeviceBody
   const deviceView = (d: ReturnType<Store['device']>) => d && { places: d.places, kinds: d.kinds, min_severity: d.min_severity, created_at: d.created_at, last_push_at: d.last_push_at || null }
 
@@ -259,6 +278,10 @@ export function createApp(deps: Deps) {
     const places = cleanPlaces(b.places ?? [])
     if (typeof places === 'string') return c.json({ error: places }, 400)
     if (!places.length) return c.json({ error: 'add at least one place' }, 400)
+    const limits = limitsFor(deps.premium, store, b.premium_key)
+    if (places.length > limits.places || places.some((p) => p.km > limits.km + 0.05)) {
+      return c.json({ error: `Free alerts cover ${FREE.places} place within ${Math.round(FREE.km * 0.621371)} miles. Premium (${PRICE} once, for life) covers ${MAX_PLACES} places up to 50 miles.`, premium_required: true }, 402)
+    }
     // Changing an existing device needs its current auth secret, which only that browser has.
     const existing = store.device(sub.endpoint)
     if (existing && existing.auth !== sub.keys.auth) return c.json({ error: 'that subscription belongs to another device' }, 403)
@@ -299,7 +322,7 @@ export async function serve(opts: { port?: number } = {}) {
   const pusher = createPusher(pushConfig(env), store)
   const geo = new Geocoder(new Database(dbPath === ':memory:' ? ':memory:' : dbPath.replace(/\.db$/, '') + '-geocache.db', { create: true }))
   const radio = new RadioFinder()
-  const app = createApp({ store, sources: SOURCES, pusher, radio, tips: coinpayConfig(env) })
+  const app = createApp({ store, sources: SOURCES, pusher, radio, premium: premiumConfig(env) })
   // The relay hostname, so pit.world serves the Moshpit footer template.
   startPitFooterRefresh('resident.alerts.pit.world')
   startRingFooterRefresh()

@@ -1,8 +1,13 @@
 # resident.alerts
 
 Live 911 incidents near you on a map, push alerts for the places you care
-about, and the police and fire radio for your county. Every feature free: no
-paid tier, no account, no ads.
+about, and the police and fire radio for your county. No account, no ads.
+
+**Free:** the live map and list (24 h), radio, every kind of call, push alerts
+for 1 place within 3 miles. **Premium, $4.99 once for life** (CoinPay): up to 25
+places, up to 50 miles each, 7 and 30 days of history. Premium is a key
+(`ra_…`), made at checkout and valid once the payment settles; the browser keeps
+it, and `X-Premium-Key` sends it to the API.
 
 - Web / PWA: https://resident.alerts (Moshpit DNS) or https://resident.alerts.pit.world
 - API: `GET /api/v1/incidents?lat=&lon=&km=&hours=&kinds=&min_severity=`, `/api/v1/incidents/:id`, `/api/v1/radio?lat=&lon=`, `/api/v1/sources`

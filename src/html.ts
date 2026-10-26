@@ -11,7 +11,7 @@ import type { Radio } from './radio.js'
 import { ringFooter } from './ring-footer.js'
 import { RING_PLACEHOLDER } from './ring.js'
 import type { Incident, Kind, Source } from './sources.js'
-import { CHAIN_LABELS, TIP_AMOUNTS } from './tips.js'
+import { CHAIN_LABELS } from './premium.js'
 import { VERSION } from './version.js'
 import { distanceText } from './worker.js'
 
@@ -86,6 +86,7 @@ ${RING_PLACEHOLDER}
   <nav aria-label="Site">
     <a href="/">Map</a>
     <a href="/radio">Radio</a>
+    <a href="/premium">Premium</a>
     <a href="/coverage">Coverage</a>
     <a href="/about">About</a>
   </nav>
@@ -109,8 +110,8 @@ export function incidentRow(i: Incident & { distance_km?: number | null }, now =
 }
 
 /** The map app. Without script it is still a list of the latest serious incidents. */
-export function homePage(ctx: Ctx, o: { latest: Incident[]; push: boolean; vapid: string; sources: number }): string {
-  const body = `<div class="app" id="app" data-vapid="${esc(o.vapid)}" data-push="${o.push ? '1' : ''}">
+export function homePage(ctx: Ctx, o: { latest: Incident[]; push: boolean; vapid: string; sources: number; price: string }): string {
+  const body = `<div class="app" id="app" data-vapid="${esc(o.vapid)}" data-push="${o.push ? '1' : ''}" data-price="${esc(o.price)}">
   <div id="map" class="map" role="region" aria-label="Map of incidents"></div>
   <div class="maptools">
     <button type="button" id="locate" class="fab" title="Center on me" aria-label="Center on me">◎</button>
@@ -126,7 +127,7 @@ export function homePage(ctx: Ctx, o: { latest: Incident[]; push: boolean; vapid
       <div class="filters">
         <div class="chips" id="kinds">${kindChips('police fire medical traffic weather quake hazard')}</div>
         <div class="row">
-          <label>Last <select id="hours"><option value="1">hour</option><option value="6" selected>6 hours</option><option value="24">24 hours</option><option value="168">7 days</option></select></label>
+          <label>Last <select id="hours"><option value="1">hour</option><option value="6" selected>6 hours</option><option value="24">24 hours</option><option value="168" data-premium>7 days ★</option><option value="720" data-premium>30 days ★</option></select></label>
           <label><input type="checkbox" id="serious"> Serious only</label>
           <span class="count" id="count"></span>
         </div>
@@ -140,7 +141,8 @@ export function homePage(ctx: Ctx, o: { latest: Incident[]; push: boolean; vapid
     </div>
     <div class="pane" data-pane="alerts" hidden>
       <div id="alerts">
-        <p class="hint">Get a push the moment something happens near the places you care about: home, work, school, your parents' place. Free, unlimited places, any radius. No account, no email, no phone number.</p>
+        <p class="hint">Get a push the moment something happens near the places you care about: home, work, school, your parents' place. No account, no email, no phone number.</p>
+        <p class="plan" id="plan">Free: 1 place within 3 miles. <a href="/premium">Premium</a>, ${esc(o.price)} once for life: up to 25 places, up to 50 miles each, and 30 days of history.</p>
         <ol class="places" id="places"></ol>
         <div class="row wrap">
           <button type="button" class="btn" id="add-here">+ Add where I am</button>
@@ -155,6 +157,7 @@ export function homePage(ctx: Ctx, o: { latest: Incident[]; push: boolean; vapid
           <button type="button" class="btn ghost" id="push-off" hidden>Turn off</button>
         </div>
         <p class="status" id="push-status" role="status"></p>
+        <details class="havekey"><summary>Have a Premium key?</summary><div class="row wrap"><input type="text" id="key-in" placeholder="ra_…" autocomplete="off" spellcheck="false" aria-label="Premium key"><button type="button" class="btn" id="key-use">Use it</button></div></details>
       </div>
     </div>
   </section>
@@ -162,8 +165,8 @@ export function homePage(ctx: Ctx, o: { latest: Incident[]; push: boolean; vapid
   <noscript><style>.map,.maptools,.tabs,.filters{display:none}</style></noscript>
 </div>`
   return layout({
-    title: 'resident.alerts: live 911 incidents near you, free',
-    description: 'A live map of police, fire, medical and traffic calls near you, from the 911 feeds cities publish, plus weather warnings, earthquakes and wildfires. Push alerts for any number of places and the police radio for your county. Every feature free.',
+    title: 'resident.alerts: live 911 incidents near you',
+    description: 'A live map of police, fire, medical and traffic calls near you, from the 911 feeds cities publish, plus weather warnings, earthquakes and wildfires. Push alerts for the places you care about and the police radio for your county. Free; Premium is $4.99 once, for life.',
     path: '/',
     body,
     ctx,
@@ -238,19 +241,24 @@ ${r ? `<h2>${esc(r.county)}, ${esc(r.stateCode)}</h2>${list || `<p>No scanner fe
   return layout({ title: 'Police and fire radio near you · resident.alerts', description: 'Live police, fire and EMS scanner audio for your county.', path: '/radio', body, ctx })
 }
 
-export function aboutPage(ctx: Ctx): string {
+export function aboutPage(ctx: Ctx, price: string): string {
   const body = `<h1>About resident.alerts</h1>
-<p class="lede">A live map of what police, fire and paramedics are being sent to near you, with a push the moment something happens near the places you care about. Like the paid safety apps, minus the paywall and the tracking.</p>
-<h2>Everything is free</h2>
+<p class="lede">A live map of what police, fire and paramedics are being sent to near you, with a push the moment something happens near the places you care about. Like the paid safety apps, for the price of a coffee once instead of a subscription, and without the tracking.</p>
+<h2>Free</h2>
 <ul class="ticks">
-  <li>Live map and list of 911 incidents, weather warnings, earthquakes and wildfires</li>
-  <li>Push alerts for <b>unlimited places</b>, any radius up to 80 km, each kind of call on or off</li>
-  <li>Serious-only mode: shootings, structure fires, tornado warnings</li>
+  <li>Live map and list of 911 incidents, weather warnings, earthquakes and wildfires, last 24 hours</li>
+  <li>Push alerts for one place within 3 miles, each kind of call on or off, serious-only mode</li>
   <li>Police and fire radio for your county</li>
-  <li>History for 30 days, shareable incident pages</li>
-  <li>An API, a command line, a terminal UI and an MCP server for agents</li>
+  <li>Shareable incident pages; an API, a command line, a terminal UI and an MCP server</li>
   <li>No ads. No account. No email or phone number. No selling your location</li>
 </ul>
+<h2>Premium: ${esc(price)} once, for life</h2>
+<ul class="ticks">
+  <li>Alerts for up to 25 places (home, work, school, family), each up to 50 miles</li>
+  <li>7 and 30 days of history on the map and in the API</li>
+  <li>Paid once in crypto through CoinPay. No subscription, nothing to cancel</li>
+</ul>
+<p><a class="btn primary" href="/premium">Get Premium</a></p>
 <h2>How it works</h2>
 <p>Cities and counties publish their dispatched calls as open data. We read those feeds every few minutes (see <a href="/coverage">coverage</a>), put each call on the map, and check it against the places devices asked about. Your places are stored with your device's push subscription and nothing else: no name, no account. Turn alerts off and they are deleted.</p>
 <p>Your location stays in your browser. The map asks our server for incidents in the area on screen; it never sends where you are standing unless you add it as a place.</p>
@@ -258,7 +266,7 @@ export function aboutPage(ctx: Ctx): string {
 <p>Not an emergency service. If you need help, call 911. Dispatch data is preliminary: call types change, locations are often a block or an intersection, and some calls are withheld by the agency for privacy.</p>
 <h2>Open source</h2>
 <p>The code is MIT-licensed at <a href="${REPO}">${REPO.replace('https://', '')}</a>. resident.alerts is a Moshpit name; on the old internet it is <a href="${SITE}">${SITE.replace('https://', '')}</a>.</p>
-<p><a class="btn" href="/tip">Chip in for the server</a> <a class="btn ghost" href="/api">API, CLI and MCP</a></p>
+<p><a class="btn ghost" href="/api">API, CLI and MCP</a></p>
 <p class="muted">v${VERSION}</p>`
   return layout({ title: 'About · resident.alerts', description: 'What resident.alerts is, what it costs (nothing), and where its data comes from.', path: '/about', body, ctx })
 }
@@ -272,7 +280,7 @@ GET ${SITE}/api/v1/incidents?kinds=police,fire&amp;min_severity=3&amp;hours=1
 GET ${SITE}/api/v1/incidents/&lt;id&gt;
 GET ${SITE}/api/v1/radio?lat=29.76&amp;lon=-95.37
 GET ${SITE}/api/v1/sources</code></pre>
-<p>Kinds: police, fire, medical, traffic, weather, quake, hazard, other. Severity 1 routine, 2 notable, 3 serious. Times are epoch milliseconds.</p>
+<p>Kinds: police, fire, medical, traffic, weather, quake, hazard, other. Severity 1 routine, 2 notable, 3 serious. Times are epoch milliseconds. Without a key, <code>hours</code> stops at 24; send <code>X-Premium-Key: ra_…</code> for up to 30 days.</p>
 <h2>Command line and terminal UI</h2>
 <pre><code>bunx @profullstack/residentalerts near 47.61 -122.33 --km 3
 bunx @profullstack/residentalerts serious --hours 1
@@ -284,20 +292,39 @@ bunx @profullstack/residentalerts watch 47.61 -122.33   # live terminal view</co
   return layout({ title: 'API, CLI and MCP · resident.alerts', description: 'Open JSON API, command line, terminal UI and MCP server for live 911 incidents.', path: '/api', body, ctx })
 }
 
-export function tipPage(ctx: Ctx, o: { chains: string[]; enabled: boolean; error?: string; thanks?: boolean }): string {
-  const body = `<h1>Chip in</h1>
-<p class="lede">resident.alerts has no paid tier and never will. If it helped you, a tip pays for the server, and keeps it that way.</p>
-${o.thanks ? '<p class="ok">Thank you. It goes straight to keeping the lights on.</p>' : ''}
+export function premiumPage(ctx: Ctx, o: { chains: string[]; enabled: boolean; price: string; error?: string }): string {
+  const body = `<h1>Premium</h1>
+<p class="lede">${esc(o.price)} once. Yours for life: no subscription, no account, nothing to cancel.</p>
+<ul class="ticks">
+  <li>Alerts for up to <b>25 places</b> (free: 1)</li>
+  <li>Each place up to <b>50 miles</b> across (free: 3 miles)</li>
+  <li><b>7 and 30 days</b> of history on the map and in the API (free: 24 hours)</li>
+</ul>
+<p class="muted">The live map, the radio, every kind of call and serious-only alerts stay free for everyone.</p>
 ${o.error ? `<p class="error">${esc(o.error)}</p>` : ''}
 ${o.enabled
-    ? `<form method="post" action="/tip" class="tipform">
-  <fieldset><legend>Amount</legend>${TIP_AMOUNTS.map((a, n) => `<label class="pill"><input type="radio" name="amount" value="${a}"${n === 1 ? ' checked' : ''}> $${a}</label>`).join('')}</fieldset>
-  <label>Pay with <select name="chain">${o.chains.map((c) => `<option value="${esc(c)}">${esc(CHAIN_LABELS[c] ?? c)}</option>`).join('')}</select></label>
-  <button class="btn primary">Tip with crypto</button>
-  <p class="muted">Payments by <a href="https://coinpayportal.com" rel="noopener">CoinPay</a>. Nothing unlocks; everything is already free.</p>
+    ? `<form method="post" action="/premium" class="tipform">
+  <label>Pay ${esc(o.price)} with <select name="chain">${o.chains.map((c) => `<option value="${esc(c)}">${esc(CHAIN_LABELS[c] ?? c)}</option>`).join('')}</select></label>
+  <button class="btn primary">Get Premium for ${esc(o.price)}</button>
+  <p class="muted">Payments by <a href="https://coinpayportal.com" rel="noopener">CoinPay</a>. When the payment confirms you get a Premium key: this browser keeps it, and you can paste it into any other device under Alerts.</p>
 </form>`
-    : '<p>Tips are not switched on yet.</p>'}`
-  return layout({ title: 'Chip in · resident.alerts', description: 'resident.alerts is free. Tips keep the server on.', path: '/tip', body, ctx })
+    : '<p>Payments are not switched on yet.</p>'}`
+  return layout({ title: 'Premium · resident.alerts', description: `resident.alerts Premium: alerts for 25 places, 50-mile radius, 30 days of history. ${o.price} once, for life.`, path: '/premium', body, ctx })
+}
+
+/** CoinPay's success page: the key, saved into this browser by app.js once the payment has settled. */
+export function premiumKeyPage(ctx: Ctx, o: { key: string; paid: boolean; price: string }): string {
+  const body = o.paid
+    ? `<h1>Premium is on ★</h1>
+<p class="lede">Thank you. This browser now has Premium. To use it on another device, paste this key under Alerts there:</p>
+<p><code class="bigkey" id="premium-key" data-premium-key="${esc(o.key)}">${esc(o.key)}</code></p>
+<p class="muted">Keep it somewhere safe: it is the only proof of purchase (we keep no account and no email). Anyone with the key gets Premium.</p>
+<p><a class="btn primary" href="/">Back to the map</a></p>`
+    : `<h1>Waiting for the payment…</h1>
+<p class="lede">CoinPay has not confirmed your payment yet. Crypto can take a few minutes; this page checks again every 15 seconds.</p>
+<p class="muted">Your key, for when it confirms: <code>${esc(o.key)}</code></p>
+<meta http-equiv="refresh" content="15">`
+  return layout({ title: 'Your Premium key · resident.alerts', description: 'Your resident.alerts Premium key.', path: '/premium', noindex: true, body, ctx })
 }
 
 export function messagePage(ctx: Ctx, o: { title: string; message: string; status?: number }): string {
