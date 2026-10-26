@@ -117,11 +117,10 @@
   function showPlan() {
     $('plan').innerHTML = state.premium
       ? `★ Premium: up to ${state.limits.places} places, up to 50 miles each, 30 days of history.`
-      : `Free: 1 place within 3 miles. <a href="/premium">Premium</a>, ${PRICE} once for life: up to 25 places, up to 50 miles each, and 30 days of history.`
+      : `Free: 1 place within 3 miles. <a href="/premium">Premium</a>, ${PRICE} once for life: up to 25 places, up to 50 miles each, and 30 days of history.${state.account ? '' : ' <a href="/signin?next=/">Sign in</a> to keep your places on every device.'}`
     for (const o of document.querySelectorAll('#hours option[data-premium]')) o.textContent = o.textContent.replace(/ ★$/, '') + (state.premium ? '' : ' ★')
   }
   async function checkPremium(key) {
-    if (!key) return false
     try {
       const r = await getJSON('/api/v1/premium/check', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key }) })
       state.premium = r.premium
@@ -129,6 +128,18 @@
     } catch {}
     showPlan()
     return state.premium
+  }
+  // Signed in? The account brings Premium and the alert places from every other device.
+  state.account = false
+  fetch('/api/v1/account').then((r) => (r.ok ? r.json() : null)).then((a) => {
+    if (!a || !a.signed_in) return
+    state.account = true
+    if (a.places.length) { state.places = a.places; store.set('places', state.places); drawPlaces() }
+    else if (state.places.length) syncAccountPlaces()
+    showPlan()
+  }).catch(() => {})
+  function syncAccountPlaces() {
+    if (state.account) fetch('/api/v1/account/places', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ places: state.places }) }).catch(() => {})
   }
   checkPremium(premiumKey())
   const feedEl = $('feed')
@@ -380,6 +391,7 @@ ${feeds.length ? `<ol class="feeds">${feeds.map((f) => `<li><a href="${esc(f.url
     store.set('places', state.places)
     renderPlaces()
     syncDevice()
+    syncAccountPlaces()
   }
   let alertsReady = false
   async function alertsInit() {

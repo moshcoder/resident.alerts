@@ -13,20 +13,22 @@ import { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { Hono, type Context } from 'hono'
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
+import { Accounts, createMailer, EMAIL, mailConfig, type Mailer, type User } from './accounts.js'
 import { SOURCES } from './cities.js'
 import { chpSource } from './chp.js'
 import { Community } from './community.js'
 import { mountCommunity } from './community-routes.js'
 import { cleanKinds, cleanPlaces, MAX_PLACES, Store } from './db.js'
 import { Geocoder } from './geocode.js'
-import { aboutPage, apiPage, coveragePage, homePage, incidentPage, messagePage, premiumKeyPage, premiumPage, radioPage, type Ctx } from './html.js'
+import { aboutPage, accountPage, apiPage, confirmSigninPage, coveragePage, homePage, incidentPage, messagePage, premiumKeyPage, premiumPage, radioPage, signinPage, type Ctx } from './html.js'
 import { startPitFooterRefresh } from './pit-footer.js'
 import { createPusher, pushConfig, type Pusher } from './push.js'
 import { RadioFinder } from './radio.js'
 import { ringDescriptor, startRingFooterRefresh } from './ring-footer.js'
 import { RING_PLACEHOLDER, ringBar, startRingRefresh, visitorOnMoshpit } from './ring.js'
 import { KINDS, type Kind, type Source } from './sources.js'
-import { FREE, hashKey, isPremium, KEY_SHAPE, limitsFor, premiumConfig, price, readWebhook, SETTLED, startPremium, verifyWebhook, type PremiumConfig } from './premium.js'
+import { FREE, hashKey, isPremium, KEY_SHAPE, limitsFor, PREMIUM, premiumConfig, price, readWebhook, SETTLED, startPremium, verifyWebhook, type PremiumConfig } from './premium.js'
 import { VERSION } from './version.js'
 import { startWorker } from './worker.js'
 
@@ -53,8 +55,14 @@ export type Deps = {
   radio: RadioFinder
   premium: PremiumConfig
   community?: Community
+  accounts?: Accounts
+  mail?: Mailer
+  secureCookies?: boolean
   fetch?: typeof fetch
 }
+
+const SESSION = 'ra_session'
+const safeNext = (n: unknown) => (typeof n === 'string' && /^\/[A-Za-z0-9/_?=&%.:#-]*$/.test(n) && !n.startsWith('//') ? n : '/account')
 
 class Limiter {
   private hits = new Map<string, { n: number; reset: number }>()
@@ -107,7 +115,25 @@ export function createApp(deps: Deps) {
 
   const direct = (c: Context) => visitorOnMoshpit(SELF, c.req.header('host'), c.req.header('x-moshpit-name'))
   const https = (c: Context) => (c.req.header('x-forwarded-proto') ?? 'https') === 'https'
-  const ctxOf = (c: Context): Ctx => ({ origin: direct(c) && https(c) ? DIRECT_ORIGIN : RELAY_ORIGIN })
+  const origin = (c: Context) => (direct(c) && https(c) ? DIRECT_ORIGIN : RELAY_ORIGIN)
+  /**
+   * The signed-in account. A cookie only counts on a write when the request came
+   * from our own pages: browsers send Sec-Fetch-Site, so a cross-site form or
+   * fetch cannot act as you.
+   */
+  const userOf = (c: Context): User | null => {
+    const acc = deps.accounts
+    if (!acc) return null
+    if (c.req.method !== 'GET' && c.req.method !== 'HEAD' && (c.req.header('sec-fetch-site') ?? 'same-origin') !== 'same-origin') return null
+    return acc.session(getCookie(c, SESSION))
+  }
+  const accountPremium = (u: User | null) => Boolean(deps.accounts && deps.accounts.premium(deps.premium, u))
+  /** Limits from a key or the signed-in account, whichever is better. */
+  const limitsOf = (c: Context, key: unknown) => (accountPremium(userOf(c)) ? PREMIUM : limitsFor(deps.premium, store, key))
+  const ctxOf = (c: Context): Ctx => {
+    const u = userOf(c)
+    return { origin: origin(c), ...(u ? { user: { email: u.email, premium: accountPremium(u) } } : {}), accounts: Boolean(deps.accounts) }
+  }
   const ip = (c: Context) => c.req.header('x-real-ip') ?? 'local'
   const page = (c: Context, html: string, status = 200) => c.html(html.replace(RING_PLACEHOLDER, ringBar(SELF, direct(c))), status as 200)
   const CORS = { 'access-control-allow-origin': '*' }
@@ -179,15 +205,86 @@ export function createApp(deps: Deps) {
     }
   })
 
+  // ---- signing in (one-time email links) ---------------------------------------------
+  const signinLimit = new Limiter(10, 60 * 60_000)
+  if (deps.accounts) {
+    const acc = deps.accounts
+    app.get('/signin', (c) => {
+      const next = safeNext(c.req.query('next'))
+      if (userOf(c)) return c.redirect(next)
+      return page(c, signinPage(ctxOf(c), { next }))
+    })
+    app.post('/signin', async (c) => {
+      const f = (await c.req.parseBody()) as Record<string, string>
+      const email = String(f.email ?? '').trim().toLowerCase()
+      const next = safeNext(f.next)
+      const news = f.news === '1'
+      if (!EMAIL.test(email)) return page(c, signinPage(ctxOf(c), { next, error: 'That does not look like an email address.', email }), 400)
+      if (!signinLimit.allow(`ip:${ip(c)}`) || acc.linksSince(email, Date.now() - 60 * 60_000) >= 5) return page(c, signinPage(ctxOf(c), { next, error: 'Too many sign-in emails. Try again in an hour.', email }), 429)
+      const t = acc.newLink(email, news)
+      const sent = deps.mail ? await deps.mail({ to: email, subject: 'Your resident.alerts sign-in link', text: `Sign in to resident.alerts:\n\n${origin(c)}/auth/${t}?next=${encodeURIComponent(next)}\n\nIt works once, for 20 minutes. If you didn't ask for this, ignore it.\n` }) : false
+      if (!sent) return page(c, signinPage(ctxOf(c), { next, error: 'We could not send the email just now. Try again in a minute.', email }), 502)
+      return page(c, signinPage(ctxOf(c), { next, sent: email }))
+    })
+    app.get('/auth/:token', (c) => {
+      const ok = acc.linkValid(c.req.param('token'))
+      c.header('cache-control', 'no-store')
+      return page(c, confirmSigninPage(ctxOf(c), { token: c.req.param('token'), next: safeNext(c.req.query('next')), ok }), ok ? 200 : 400)
+    })
+    app.post('/auth/:token', async (c) => {
+      const f = (await c.req.parseBody()) as Record<string, string>
+      const u = acc.takeLink(c.req.param('token'))
+      if (!u) return page(c, confirmSigninPage(ctxOf(c), { token: '', next: '/account', ok: false }), 400)
+      setCookie(c, SESSION, acc.newSession(u.id), { httpOnly: true, secure: deps.secureCookies ?? https(c), sameSite: 'Lax', path: '/', maxAge: 180 * 86_400 })
+      return c.redirect(safeNext(f.next))
+    })
+    app.post('/signout', (c) => {
+      acc.endSession(getCookie(c, SESSION))
+      deleteCookie(c, SESSION, { path: '/' })
+      return c.redirect('/')
+    })
+    const accountView = (c: Context, u: User, extra: { flash?: string; error?: string } = {}, status = 200) =>
+      page(c, accountPage(ctxOf(c), { email: u.email, premium: accountPremium(u), since: acc.premiumSince(u), news: Boolean(u.news), places: u.places.length, price: PRICE, ...extra }), status)
+    app.get('/account', (c) => {
+      const u = userOf(c)
+      if (!u) return c.redirect('/signin?next=/account')
+      return accountView(c, u, c.req.query('paid') ? { flash: 'Payment sent. Premium switches on as soon as CoinPay confirms it (usually a minute or two), and we email you a receipt.' } : {})
+    })
+    app.post('/account', async (c) => {
+      const u = userOf(c)
+      if (!u) return c.redirect('/signin?next=/account')
+      const f = (await c.req.parseBody()) as Record<string, string>
+      switch (f.action) {
+        case 'news':
+          acc.setNews(u.id, f.news === '1')
+          return accountView(c, acc.user(u.id)!, { flash: f.news === '1' ? 'You will get occasional updates.' : 'No more updates. Sign-in links and receipts still arrive.' })
+        case 'key':
+          return acc.attachKey(deps.premium, u.id, String(f.key ?? ''))
+            ? accountView(c, u, { flash: 'Key attached: Premium is on your account.' })
+            : accountView(c, u, { error: 'That key is not valid, or its payment has not confirmed yet.' }, 400)
+        case 'delete':
+          if (f.sure !== '1') return accountView(c, u, { error: 'Tick the box to delete your account.' }, 400)
+          acc.deleteUser(u.id)
+          deleteCookie(c, SESSION, { path: '/' })
+          return page(c, messagePage(ctxOf(c), { title: 'Account deleted', message: 'Your email and saved places are gone. Alerts on your devices keep working until you turn them off.' }))
+      }
+      return c.redirect('/account')
+    })
+  }
+
   // ---- Premium ---------------------------------------------------------------------
 
-  const premiumView = (c: Context, error?: string, status = 200) => page(c, premiumPage(ctxOf(c), { chains: deps.premium.chains, enabled: Boolean(deps.premium.coinpay), price: PRICE, ...(error ? { error } : {}) }), status)
+  const premiumView = (c: Context, error?: string, status = 200) => page(c, premiumPage(ctxOf(c), { chains: deps.premium.chains, enabled: Boolean(deps.premium.coinpay), price: PRICE, needSignin: Boolean(deps.accounts) && !userOf(c), ...(error ? { error } : {}) }), status)
   app.get('/premium', (c) => premiumView(c))
   app.get('/tip', (c) => c.redirect('/premium', 301))
   app.post('/premium', async (c) => {
     const f = (await c.req.parseBody()) as Record<string, string>
+    const u = userOf(c)
+    // Premium belongs to an account, so a lost browser never loses it.
+    if (deps.accounts && !u) return c.redirect('/signin?next=/premium')
+    if (u && accountPremium(u)) return c.redirect('/account')
     try {
-      const out = await startPremium(deps.premium, store, { chain: String(f.chain ?? ''), successUrl: (key) => `${RELAY_ORIGIN}/premium/k/${key}`, cancelUrl: `${RELAY_ORIGIN}/premium` }, deps.fetch)
+      const out = await startPremium(deps.premium, store, { chain: String(f.chain ?? ''), successUrl: (key) => (u ? `${origin(c)}/account?paid=1` : `${RELAY_ORIGIN}/premium/k/${key}`), cancelUrl: `${origin(c)}/premium`, ...(u ? { userId: u.id } : {}) }, deps.fetch)
       return c.redirect(out.checkoutUrl)
     } catch (e) {
       return premiumView(c, e instanceof Error ? e.message : String(e), 400)
@@ -214,7 +311,13 @@ export function createApp(deps: Deps) {
     const { ref, status } = readWebhook(payload)
     const known = ref ? store.payment(String(ref)) : null
     if (!known) return c.json({ ok: true, ignored: 'unknown payment' })
+    const wasPaid = store.licensePaid(known.license_hash ?? '-')
     store.settlePayment(known.ref, status, payload, SETTLED.has(status))
+    // A receipt, once, to the account that paid.
+    const u = known.user_id && deps.accounts ? deps.accounts.user(known.user_id) : null
+    if (u && SETTLED.has(status) && !wasPaid && deps.mail) {
+      await deps.mail({ to: u.email, subject: 'resident.alerts Premium is on', text: `Thanks for buying resident.alerts Premium (${PRICE}, for life).\n\nIt is tied to your account (${u.email}): sign in on any phone or computer and it is there. Up to 25 alert places, 50 miles each, and 30 days of history.\n\n${RELAY_ORIGIN}/account\n` })
+    }
     return c.json({ ok: true, status, settled: SETTLED.has(status) })
   })
 
@@ -230,7 +333,7 @@ export function createApp(deps: Deps) {
 
   api.get('/incidents', (c) => {
     // History past a day is Premium; without a key the window quietly stops at 24 hours.
-    const q = incidentQuery(c.req.query(), limitsFor(deps.premium, store, keyOf(c)).hours)
+    const q = incidentQuery(c.req.query(), limitsOf(c, keyOf(c)).hours)
     const list = store.near(q)
     return c.json({ count: list.length, incidents: list }, 200, { 'cache-control': 'public, max-age=20' })
   })
@@ -265,8 +368,8 @@ export function createApp(deps: Deps) {
   api.get('/vapid', (c) => c.json({ enabled: pusher.enabled, publicKey: pusher.publicKey }))
   api.post('/premium/check', async (c) => {
     const b = ((await c.req.json().catch(() => ({}))) ?? {}) as { key?: string }
-    const premium = isPremium(deps.premium, store, b.key)
-    return c.json({ premium, limits: premium ? limitsFor(deps.premium, store, b.key) : FREE, price: PRICE })
+    const premium = isPremium(deps.premium, store, b.key) || accountPremium(userOf(c))
+    return c.json({ premium, limits: premium ? PREMIUM : FREE, price: PRICE })
   })
 
   type DeviceBody = { subscription?: { endpoint?: string; keys?: { p256dh?: string; auth?: string } }; endpoint?: string; auth?: string; places?: unknown; kinds?: unknown; min_severity?: unknown; premium_key?: string }
@@ -283,7 +386,7 @@ export function createApp(deps: Deps) {
     const places = cleanPlaces(b.places ?? [])
     if (typeof places === 'string') return c.json({ error: places }, 400)
     if (!places.length) return c.json({ error: 'add at least one place' }, 400)
-    const limits = limitsFor(deps.premium, store, b.premium_key)
+    const limits = limitsOf(c, b.premium_key)
     if (places.length > limits.places || places.some((p) => p.km > limits.km + 0.05)) {
       return c.json({ error: `Free alerts cover ${FREE.places} place within ${Math.round(FREE.km * 0.621371)} miles. Premium (${PRICE} once, for life) covers ${MAX_PLACES} places up to 50 miles.`, premium_required: true }, 402)
     }
@@ -313,7 +416,26 @@ export function createApp(deps: Deps) {
     return c.json({ ok: true, deleted: Boolean(d) })
   })
 
-  if (deps.community) mountCommunity(app, api, { store, community: deps.community, pusher })
+  // ---- the account, for the app ----------------------------------------------------
+  api.get('/account', (c) => {
+    const u = userOf(c)
+    if (!u) return c.json({ signed_in: false }, 401)
+    return c.json({ signed_in: true, email: u.email, premium: accountPremium(u), places: u.places, news: Boolean(u.news) })
+  })
+  api.put('/account/places', async (c) => {
+    const u = userOf(c)
+    if (!u || !deps.accounts) return c.json({ error: 'sign in first' }, 401)
+    const b = ((await c.req.json().catch(() => ({}))) ?? {}) as { places?: unknown }
+    const lim = limitsOf(c, undefined)
+    const places = deps.accounts.setPlaces(u.id, Array.isArray(b.places) ? b.places.slice(0, lim.places) : [])
+    return typeof places === 'string' ? c.json({ error: places }, 400) : c.json({ places })
+  })
+  api.get('/admin/emails', (c) => {
+    if (!deps.community?.isAdmin(c.req.header('x-admin-key')) || !deps.accounts) return c.json({ error: 'forbidden' }, 403)
+    return c.body(deps.accounts.newsCsv(), 200, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="resident-alerts-emails.csv"' })
+  })
+
+  if (deps.community) mountCommunity(app, api, { store, community: deps.community, pusher, ...(deps.accounts ? { userOf, banUser: (id: string) => deps.accounts!.ban(id) } : {}) })
   app.route('/api/v1', api)
 
   app.notFound((c) => page(c, messagePage(ctxOf(c), { title: 'Not found', message: 'Nothing lives at this address.' }), 404))
@@ -336,7 +458,9 @@ export async function serve(opts: { port?: number } = {}) {
     ...(env.COMMUNITY_SECRET ? { secret: env.COMMUNITY_SECRET } : {}),
   })
   setInterval(() => community.prune(30), 6 * 3600_000).unref?.()
-  const app = createApp({ store, sources, pusher, radio, premium: premiumConfig(env), community })
+  const accounts = new Accounts(store.db, Date.now, (env.ADMIN_EMAILS ?? '').split(/[\s,]+/))
+  const mail = createMailer(mailConfig(env))
+  const app = createApp({ store, sources, pusher, radio, premium: premiumConfig(env), community, accounts, mail })
   // The relay hostname, so pit.world serves the Moshpit footer template.
   startPitFooterRefresh('resident.alerts.pit.world')
   startRingFooterRefresh()

@@ -39,9 +39,15 @@
     if (!r.ok) throw Object.assign(new Error(body.error || 'HTTP ' + r.status), { status: r.status })
     return body
   }
+  // Posting needs an account: signed out, we offer the sign-in page and come back here.
   async function ensureResident() {
     if (token()) return true
-    const name = prompt('Pick a name neighbors will see (or leave it blank for "Neighbor 1234"):', '')
+    const account = await fetch('/api/v1/account').then((r) => (r.ok ? r.json() : null)).catch(() => null)
+    if (!account || !account.signed_in) {
+      if (confirm('Sign in with your email to post, comment and share photos. It takes a minute: we email you a one-time link. Go to sign in?')) location.href = '/signin?next=' + encodeURIComponent(location.pathname + location.search)
+      return false
+    }
+    const name = prompt('Pick a name neighbors will see (or leave it blank for "Neighbor 1234"):', ls.get('name', '') || '')
     if (name === null) return false
     try {
       const r = await api('/residents', { method: 'POST', json: { name: name.trim() } })

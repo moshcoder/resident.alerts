@@ -47,7 +47,7 @@ const iso = (at: number) => new Date(at).toISOString()
 
 const LOGO = `<svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="18" r="4.5" fill="currentColor"/><path d="M8.5 25.5a10.6 10.6 0 0 1 0-15M23.5 10.5a10.6 10.6 0 0 1 0 15M4.6 29a16 16 0 0 1 0-22M27.4 7a16 16 0 0 1 0 22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>`
 
-export type Ctx = { origin: string }
+export type Ctx = { origin: string; user?: { email: string; premium: boolean }; accounts?: boolean }
 type LayoutOptions = { title: string; description: string; path: string; body: string; ctx: Ctx; noindex?: boolean; app?: boolean; map?: boolean; bodyClass?: string; jsonLd?: unknown }
 
 function layout(o: LayoutOptions): string {
@@ -88,9 +88,10 @@ ${RING_PLACEHOLDER}
   <nav aria-label="Site">
     <a href="/">Map</a>
     <a href="/radio">Radio</a>
-    <a href="/premium">Premium</a>
+    ${o.ctx.user?.premium ? '' : '<a href="/premium">Premium</a>'}
     <a href="/coverage">Coverage</a>
     <a href="/about">About</a>
+    ${o.ctx.accounts ? (o.ctx.user ? `<a href="/account" class="acct">${o.ctx.user.premium ? '★ ' : ''}Account</a>` : '<a href="/signin" class="acct">Sign in</a>') : ''}
   </nav>
 </header>
 ${o.app ? o.body.replace('<!--footers-->', `<div class="appfoot">${ringFooter()}${pitFooter()}</div>`) : `<main class="page">\n${o.body}\n</main>\n${ringFooter()}\n${pitFooter()}`}
@@ -284,8 +285,10 @@ export function aboutPage(ctx: Ctx, price: string): string {
   <li>Police and fire radio for your county</li>
   <li>Comments on every incident, a neighborhood chat, and your own reports with photos and videos (location data stripped before they go public)</li>
   <li>Shareable incident pages; an API, a command line, a terminal UI and an MCP server</li>
-  <li>No ads. No account. No email or phone number. No selling your location</li>
+  <li>No ads. No selling your location. The map, radio and one alert place need no account at all</li>
 </ul>
+<h2>Accounts</h2>
+<p>Sign in with just your email (a one-time link, no password) to post, comment and share photos and videos, and to keep Premium and your alert places on every device. We email you sign-in links, Premium receipts and, only if you leave the box ticked, a few updates a year.</p>
 <h2>Premium: ${esc(price)} once, for life</h2>
 <ul class="ticks">
   <li>Alerts for up to 25 places (home, work, school, family), each up to 50 miles</li>
@@ -299,7 +302,7 @@ export function aboutPage(ctx: Ctx, price: string): string {
 <h2>What it is not</h2>
 <p>Not an emergency service. If you need help, call 911. Dispatch data is preliminary: call types change, locations are often a block or an intersection, and some calls are withheld by the agency for privacy. Resident reports are what neighbors posted: they are marked unverified, alert nobody until two other residents confirm them, and disappear after three flags.</p>
 <h2>Community rules</h2>
-<p>Pseudonyms, no accounts. Do not post faces of victims, license plates, home addresses or anything that puts someone at risk. No harassment, no vigilantism, no spam. Three flags hide a post; abusive names are banned with the network they posted from.</p>
+<p>You post under a name you pick; your email is never shown. Do not post faces of victims, license plates, home addresses or anything that puts someone at risk. No harassment, no vigilantism, no spam. Three flags hide a post; abusive names are banned with the network they posted from.</p>
 <h2>Open source</h2>
 <p>The code is MIT-licensed at <a href="${REPO}">${REPO.replace('https://', '')}</a>. resident.alerts is a Moshpit name; on the old internet it is <a href="${SITE}">${SITE.replace('https://', '')}</a>.</p>
 <p><a class="btn ghost" href="/api">API, CLI and MCP</a></p>
@@ -335,7 +338,7 @@ POST /api/v1/reports/&lt;id&gt;/confirm · POST /api/v1/flag {"target":"post:&lt
   return layout({ title: 'API, CLI and MCP · resident.alerts', description: 'Open JSON API, command line, terminal UI and MCP server for live 911 incidents.', path: '/api', body, ctx })
 }
 
-export function premiumPage(ctx: Ctx, o: { chains: string[]; enabled: boolean; price: string; error?: string }): string {
+export function premiumPage(ctx: Ctx, o: { chains: string[]; enabled: boolean; price: string; error?: string; needSignin?: boolean }): string {
   const body = `<h1>Premium</h1>
 <p class="lede">${esc(o.price)} once. Yours for life: no subscription, no account, nothing to cancel.</p>
 <ul class="ticks">
@@ -345,11 +348,11 @@ export function premiumPage(ctx: Ctx, o: { chains: string[]; enabled: boolean; p
 </ul>
 <p class="muted">The live map, the radio, every kind of call and serious-only alerts stay free for everyone.</p>
 ${o.error ? `<p class="error">${esc(o.error)}</p>` : ''}
-${o.enabled
+${ctx.user?.premium ? `<p class="ok">★ Premium is on for ${esc(ctx.user.email)}. <a href="/account">Your account</a></p>` : o.needSignin && o.enabled ? `<p><a class="btn primary" href="/signin?next=/premium">Sign in to get Premium</a></p><p class="muted">Premium belongs to your account, so it follows you to every device and can never be lost with a browser. Signing in is just your email: we send a one-time link.</p>` : o.enabled
     ? `<form method="post" action="/premium" class="tipform">
   <label>Pay ${esc(o.price)} with <select name="chain">${o.chains.map((c) => `<option value="${esc(c)}">${esc(CHAIN_LABELS[c] ?? c)}</option>`).join('')}</select></label>
   <button class="btn primary">Get Premium for ${esc(o.price)}</button>
-  <p class="muted">Payments by <a href="https://coinpayportal.com" rel="noopener">CoinPay</a>. When the payment confirms you get a Premium key: this browser keeps it, and you can paste it into any other device under Alerts.</p>
+  <p class="muted">Payments by <a href="https://coinpayportal.com" rel="noopener">CoinPay</a>. ${ctx.user ? `Premium goes on your account (${esc(ctx.user.email)}) as soon as the payment confirms, and we email you a receipt.` : 'When the payment confirms you get a Premium key: this browser keeps it, and you can paste it into any other device under Alerts.'}</p>
 </form>`
     : '<p>Payments are not switched on yet.</p>'}`
   return layout({ title: 'Premium · resident.alerts', description: `resident.alerts Premium: alerts for 25 places, 50-mile radius, 30 days of history. ${o.price} once, for life.`, path: '/premium', body, ctx })
@@ -368,6 +371,61 @@ export function premiumKeyPage(ctx: Ctx, o: { key: string; paid: boolean; price:
 <p class="muted">Your key, for when it confirms: <code>${esc(o.key)}</code></p>
 <meta http-equiv="refresh" content="15">`
   return layout({ title: 'Your Premium key · resident.alerts', description: 'Your resident.alerts Premium key.', path: '/premium', noindex: true, body, ctx })
+}
+
+export function signinPage(ctx: Ctx, o: { next: string; error?: string; sent?: string; email?: string }): string {
+  const body = o.sent
+    ? `<h1>Check your email</h1>
+<p class="lede">We sent a sign-in link to <b>${esc(o.sent)}</b>. It works once, for 20 minutes.</p>
+<p class="muted">Nothing there? Check spam, or <a href="/signin?next=${esc(encodeURIComponent(o.next))}">send another</a>.</p>`
+    : `<h1>Sign in</h1>
+<p class="lede">Just your email: we send you a one-time link. No password.</p>
+<p class="muted">An account keeps Premium, your alert places and your community name on every device, and lets you post, comment and share photos and videos.</p>
+${o.error ? `<p class="error">${esc(o.error)}</p>` : ''}
+<form method="post" action="/signin" class="signin">
+  <input type="hidden" name="next" value="${esc(o.next)}">
+  <label>Email<input type="email" name="email" required autocomplete="email" inputmode="email" value="${esc(o.email ?? '')}" placeholder="you@example.com"></label>
+  <label class="check"><input type="checkbox" name="news" value="1" checked> Send me occasional updates about resident.alerts (a few a year; unsubscribe any time)</label>
+  <button class="btn primary">Email me a sign-in link</button>
+</form>`
+  return layout({ title: 'Sign in · resident.alerts', description: 'Sign in to resident.alerts with your email.', path: '/signin', noindex: true, body, ctx })
+}
+
+/** The link in the email opens this; the POST spends it (mail scanners only follow GETs). */
+export function confirmSigninPage(ctx: Ctx, o: { token: string; next: string; ok: boolean }): string {
+  const body = o.ok
+    ? `<h1>Sign in</h1><form method="post" action="/auth/${esc(o.token)}"><input type="hidden" name="next" value="${esc(o.next)}"><button class="btn primary">Sign in to resident.alerts</button></form>`
+    : `<h1>That link is used up</h1><p>Sign-in links work once, for 20 minutes.</p><p><a class="btn primary" href="/signin">Send a new one</a></p>`
+  return layout({ title: 'Sign in · resident.alerts', description: 'Finish signing in.', path: '/signin', noindex: true, body, ctx })
+}
+
+export function accountPage(ctx: Ctx, o: { email: string; premium: boolean; since: number | null; news: boolean; places: number; price: string; flash?: string; error?: string }): string {
+  const body = `<h1>Your account</h1>
+${o.flash ? `<p class="ok">${esc(o.flash)}</p>` : ''}${o.error ? `<p class="error">${esc(o.error)}</p>` : ''}
+<p class="lede">${esc(o.email)}</p>
+<section class="card">
+  <h2>${o.premium ? '★ Premium' : 'Free'}</h2>
+  ${o.premium
+    ? `<p>Premium is on${o.since ? ` since ${esc(new Date(o.since).toISOString().slice(0, 10))}` : ''}: up to 25 alert places, 50 miles each, 30 days of history, on every device you sign in on.</p>`
+    : `<p>1 alert place within 3 miles, 24 hours of history. <a class="btn primary" href="/premium">Get Premium for ${esc(o.price)}, once</a></p>
+<form method="post" action="/account" class="row wrap"><input type="hidden" name="action" value="key"><input type="text" name="key" placeholder="Have a Premium key? ra_…" autocomplete="off" spellcheck="false" aria-label="Premium key"><button class="btn">Attach it</button></form>`}
+</section>
+<section class="card">
+  <h2>Alert places</h2>
+  <p>${o.places ? `${o.places} place${o.places === 1 ? '' : 's'} saved to your account.` : 'None saved yet.'} Manage them under Alerts on <a href="/">the map</a>; they follow you to every device you sign in on.</p>
+</section>
+<section class="card">
+  <h2>Email</h2>
+  <form method="post" action="/account"><input type="hidden" name="action" value="news">
+    <label class="check"><input type="checkbox" name="news" value="1"${o.news ? ' checked' : ''}> Occasional updates about resident.alerts</label>
+    <button class="btn ghost">Save</button>
+  </form>
+</section>
+<p class="row wrap"><form method="post" action="/signout"><button class="btn">Sign out</button></form></p>
+<details class="danger"><summary>Delete my account</summary>
+  <form method="post" action="/account"><input type="hidden" name="action" value="delete"><label class="check"><input type="checkbox" name="sure" value="1"> Yes, delete my email, saved places and Premium on this account</label><button class="btn">Delete</button></form>
+</details>`
+  return layout({ title: 'Account · resident.alerts', description: 'Your resident.alerts account.', path: '/account', noindex: true, body, ctx })
 }
 
 export function messagePage(ctx: Ctx, o: { title: string; message: string; status?: number }): string {

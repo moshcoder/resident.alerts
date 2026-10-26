@@ -28,7 +28,7 @@ class Limiter {
 const HOUR = 3600_000
 const DAY = 24 * HOUR
 
-export function mountCommunity(app: Hono, api: Hono, deps: { store: Store; community: Community; pusher: Pusher }) {
+export function mountCommunity(app: Hono, api: Hono, deps: { store: Store; community: Community; pusher: Pusher; userOf?: (c: Context) => { id: string } | null; banUser?: (id: string) => void }) {
   const { community: cm, store } = deps
   const ip = (c: Context) => c.req.header('x-real-ip') ?? 'local'
   const token = (c: Context) => (c.req.header('authorization') ?? '').replace(/^Bearer\s+/i, '') || c.req.header('x-resident-token')
@@ -39,13 +39,16 @@ export function mountCommunity(app: Hono, api: Hono, deps: { store: Store; commu
   const joinLimit = new Limiter(5, HOUR)
 
   // ---- residents ---------------------------------------------------------------
+  // Posting needs an account (when accounts are on): the token comes from a signed-in session.
   api.post('/residents', async (c) => {
     if (cm.networkBanned(ip(c))) return c.json({ error: 'posting is closed from this network' }, 403)
-    if (!joinLimit.allow(`join:${ip(c)}`) || cm.residentsFrom(ip(c), Date.now() - DAY) >= 10) return c.json({ error: 'too many new names from here today' }, 429)
+    const user = deps.userOf ? deps.userOf(c) : null
+    if (deps.userOf && !user) return c.json({ error: 'sign in with your email to post', signin: '/signin' }, 401)
+    if (!joinLimit.allow(`join:${ip(c)}`) || (!user && cm.residentsFrom(ip(c), Date.now() - DAY) >= 10)) return c.json({ error: 'too many new names from here today' }, 429)
     const b = await json(c)
     const name = b.name === undefined || b.name === '' ? null : cleanName(b.name)
     if (b.name && !name) return c.json({ error: 'Names are 2 to 30 letters, numbers, spaces, . _ \' -, and cannot claim to be official.' }, 400)
-    const { resident, token } = cm.newResident(name, ip(c))
+    const { resident, token } = user ? cm.residentForUser(user.id, name, ip(c)) : cm.newResident(name, ip(c))
     return c.json({ token, resident: { id: resident.id, name: resident.name } }, 201)
   })
   api.get('/residents/me', (c) => {
@@ -178,7 +181,12 @@ export function mountCommunity(app: Hono, api: Hono, deps: { store: Store; commu
   })
   api.post('/admin/ban', async (c) => {
     if (!admin(c)) return c.json({ error: 'forbidden' }, 403)
-    return c.json({ banned: cm.ban(String((await json(c)).resident_id ?? '')) })
+    const id = String((await json(c)).resident_id ?? '')
+    const user = cm.userOf(id)
+    const banned = cm.ban(id)
+    // The account goes too, so a new sign-in with the same email cannot post again.
+    if (banned && user) deps.banUser?.(user)
+    return c.json({ banned })
   })
   api.get('/admin/stats', (c) => (admin(c) ? c.json(cm.stats()) : c.json({ error: 'forbidden' }, 403)))
 }

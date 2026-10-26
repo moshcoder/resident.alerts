@@ -142,7 +142,12 @@ export class Community {
       CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, resident_id TEXT NOT NULL, media TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL, alerted INTEGER NOT NULL DEFAULT 0, hidden INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS confirms (report_id TEXT NOT NULL, resident_id TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (report_id, resident_id));
       CREATE TABLE IF NOT EXISTS flags (target TEXT NOT NULL, resident_id TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (target, resident_id));
+      CREATE TABLE IF NOT EXISTS resident_tokens (hash TEXT PRIMARY KEY, resident_id TEXT NOT NULL, at INTEGER NOT NULL);
     `)
+    // 0.4.0: a resident belongs to an account; each signed-in browser gets its own token.
+    const cols = (db.query('PRAGMA table_info(residents)').all() as Row[]).map((c) => c.name)
+    if (!cols.includes('user_id')) db.exec('ALTER TABLE residents ADD COLUMN user_id TEXT')
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS residents_user ON residents(user_id) WHERE user_id IS NOT NULL')
   }
 
   now() {
@@ -173,8 +178,26 @@ export class Community {
   }
   byToken(token: string | undefined): Resident | null {
     if (!token || !/^rt_[A-Za-z0-9_-]{20,}$/.test(token)) return null
-    const r = this.db.query('SELECT id, name, created_at, banned FROM residents WHERE token_hash = ?').get(sha(token)) as Resident | null
+    const h = sha(token)
+    const r = (this.db.query('SELECT id, name, created_at, banned FROM residents WHERE token_hash = ?').get(h) ??
+      this.db.query('SELECT r.id, r.name, r.created_at, r.banned FROM resident_tokens t JOIN residents r ON r.id = t.resident_id WHERE t.hash = ?').get(h)) as Resident | null
     return r && !r.banned ? r : null
+  }
+  /** The account's community name (made on first use) and a fresh token for this browser. */
+  residentForUser(userId: string, name: string | null, ip: string): { resident: Resident; token: string } {
+    const existing = this.db.query('SELECT id FROM residents WHERE user_id = ?').get(userId) as Row | null
+    if (!existing) {
+      const made = this.newResident(name, ip)
+      this.db.query('UPDATE residents SET user_id = ? WHERE id = ?').run(userId, made.resident.id)
+      return made
+    }
+    if (name) this.rename(existing.id, name)
+    const token = `rt_${newId(24)}`
+    this.db.query('INSERT INTO resident_tokens (hash, resident_id, at) VALUES (?, ?, ?)').run(sha(token), existing.id, this.now())
+    return { resident: this.resident(existing.id)!, token }
+  }
+  userOf(residentId: string): string | null {
+    return ((this.db.query('SELECT user_id FROM residents WHERE id = ?').get(residentId) as Row | null)?.user_id as string | null) ?? null
   }
   rename(id: string, name: string) {
     this.db.query('UPDATE residents SET name = ? WHERE id = ?').run(name, id)
