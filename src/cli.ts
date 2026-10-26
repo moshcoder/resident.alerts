@@ -6,6 +6,8 @@
  *   residentalerts show <id> [--json]
  *   residentalerts radio <lat> <lon> [--json]
  *   residentalerts sources [--json]
+ *   residentalerts comments <id> [--json]             what neighbors said about an incident
+ *   residentalerts chat <lat> <lon> [--json]          the area chat there
  *   residentalerts watch <lat> <lon> [--km 3]         live terminal view (also: residentalerts tui)
  *   residentalerts mcp                                 MCP server on stdio
  *   residentalerts serve                               run the web server yourself
@@ -21,6 +23,8 @@ const HELP = `residentalerts ${VERSION}: live 911 incidents near you (https://re
   residentalerts show <id> [--json]
   residentalerts radio <lat> <lon> [--json]
   residentalerts sources [--json]
+  residentalerts comments <id> [--json]
+  residentalerts chat <lat> <lon> [--json]
   residentalerts watch <lat> <lon> [--km 3]     live terminal view
   residentalerts mcp                             MCP server on stdio
   residentalerts serve                           run the web server
@@ -110,6 +114,21 @@ export async function main(argv = process.argv.slice(2), out = (s: string) => co
         const list = await client.sources()
         if (flags.json) return json(list), 0
         for (const s of list) out(`${s.last_ok && Date.now() - s.last_ok < 30 * 60_000 ? '●' : '○'} ${s.name.padEnd(42)} ${s.area.padEnd(18)} ${String(s.last_24h).padStart(6)} in 24h`)
+        return 0
+      }
+      case 'comments':
+      case 'chat': {
+        let posts
+        if (cmd === 'comments') {
+          if (!pos[0]) throw new Error('usage: residentalerts comments <id>')
+          posts = await client.comments(pos[0])
+        } else {
+          const q = queryFrom(pos, flags)
+          if (q.lat === undefined) throw new Error('usage: residentalerts chat <lat> <lon>')
+          posts = await client.chat(q.lat, q.lon!)
+        }
+        if (flags.json) return json(posts), 0
+        out(posts.length ? posts.map((p) => `${when(p.created_at).padStart(3)}  ${p.name}: ${p.text}${p.media.length ? `  [${p.media.length} ${p.media[0]!.kind}${p.media.length > 1 ? 's' : ''}] ${client.base}${p.media[0]!.url}` : ''}`).join('\n') : 'Nothing yet.')
         return 0
       }
       case 'watch':

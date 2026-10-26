@@ -11,9 +11,12 @@
  */
 import { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { Hono, type Context } from 'hono'
-import { CITY_SOURCES, SOURCES, sourceById } from './cities.js'
+import { SOURCES } from './cities.js'
+import { chpSource } from './chp.js'
+import { Community } from './community.js'
+import { mountCommunity } from './community-routes.js'
 import { cleanKinds, cleanPlaces, MAX_PLACES, Store } from './db.js'
 import { Geocoder } from './geocode.js'
 import { aboutPage, apiPage, coveragePage, homePage, incidentPage, messagePage, premiumKeyPage, premiumPage, radioPage, type Ctx } from './html.js'
@@ -35,7 +38,7 @@ export const RELAY_ORIGIN = 'https://resident.alerts.pit.world'
 
 const SECURITY_HEADERS: Record<string, string> = {
   'content-security-policy':
-    "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' https://crawlproof.com; img-src 'self' data: https://tile.openstreetmap.org https://built.indie.pit.world; connect-src 'self' https://crawlproof.com; worker-src 'self'; manifest-src 'self'; form-action 'self' https://coinpayportal.com; base-uri 'none'; frame-ancestors 'none'",
+    "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' https://crawlproof.com; img-src 'self' data: blob: https://tile.openstreetmap.org https://built.indie.pit.world; media-src 'self' blob:; connect-src 'self' https://crawlproof.com; worker-src 'self'; manifest-src 'self'; form-action 'self' https://coinpayportal.com; base-uri 'none'; frame-ancestors 'none'",
   'referrer-policy': 'strict-origin-when-cross-origin',
   'x-content-type-options': 'nosniff',
   // The map asks for your location itself (in the browser); nothing else is used.
@@ -49,6 +52,7 @@ export type Deps = {
   pusher: Pusher
   radio: RadioFinder
   premium: PremiumConfig
+  community?: Community
   fetch?: typeof fetch
 }
 
@@ -117,7 +121,8 @@ export function createApp(deps: Deps) {
       return c.text('cross-site request refused', 403)
     }
     await next()
-    for (const [k, v] of Object.entries(SECURITY_HEADERS)) c.header(k, v)
+    // A route that set its own (uploaded media sets a sandbox CSP) keeps it.
+    for (const [k, v] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(k)) c.header(k, v)
   })
 
   app.get('/health', (c) => c.json({ ok: true, version: VERSION, push: pusher.enabled, devices: store.countDevices(), sources: store.sourceStates().filter((s) => s.last_ok > Date.now() - 30 * 60_000).length }))
@@ -132,7 +137,7 @@ export function createApp(deps: Deps) {
   app.get('/llms.txt', (c) => c.text(`# resident.alerts\n\nLive 911 incidents (police, fire, medical, traffic) from US city open-data feeds, plus NWS warnings, USGS earthquakes and NIFC wildfires. Free, no key.\n\n- GET ${RELAY_ORIGIN}/api/v1/incidents?lat=&lon=&km=&hours=&kinds=&min_severity=\n- GET ${RELAY_ORIGIN}/api/v1/incidents/{id}\n- GET ${RELAY_ORIGIN}/api/v1/radio?lat=&lon=\n- GET ${RELAY_ORIGIN}/api/v1/sources\n- MCP: bunx @profullstack/residentalerts mcp\n`))
 
   const TYPES: Record<string, string> = { css: 'text/css; charset=utf-8', js: 'text/javascript; charset=utf-8', svg: 'image/svg+xml', png: 'image/png', webmanifest: 'application/manifest+json', html: 'text/html; charset=utf-8', crt: 'application/x-x509-ca-cert' }
-  app.get('/:file{(style\\.css|app\\.js|sw\\.js|favicon\\.svg|icon-192\\.png|icon-512\\.png|manifest\\.webmanifest|offline\\.html|moshpit-root-ca\\.crt)}', async (c) => {
+  app.get('/:file{(style\\.css|app\\.js|community\\.js|sw\\.js|favicon\\.svg|icon-192\\.png|icon-512\\.png|manifest\\.webmanifest|offline\\.html|moshpit-root-ca\\.crt)}', async (c) => {
     const name = c.req.param('file')
     const file = Bun.file(new URL(`../public/${name}`, import.meta.url))
     const cache = name === 'sw.js' ? 'no-cache' : 'public, max-age=86400'
@@ -156,7 +161,7 @@ export function createApp(deps: Deps) {
     const i = store.incident(c.req.param('id'))
     if (!i) return page(c, messagePage(ctxOf(c), { title: 'Not found', message: 'That incident is not in our records. We keep 30 days.' }), 404)
     const nearby = store.near({ lat: i.lat, lon: i.lon, km: 1.5, sinceMs: i.at - 24 * 3600_000, limit: 12 }).filter((n) => n.id !== i.id && !n.shape)
-    return page(c, incidentPage(ctxOf(c), { i, nearby, source: sourceById(i.source) }))
+    return page(c, incidentPage(ctxOf(c), { i, nearby, source: deps.sources.find((s) => s.id === i.source) }))
   })
   app.get('/coverage', (c) => page(c, coveragePage(ctxOf(c), { sources: deps.sources, states: store.sourceStates(), counts: store.counts(Date.now() - 24 * 3600_000), devices: store.countDevices() })))
   app.get('/about', (c) => page(c, aboutPage(ctxOf(c), PRICE)))
@@ -238,7 +243,7 @@ export function createApp(deps: Deps) {
     const counts = store.counts(Date.now() - 24 * 3600_000)
     return c.json({
       sources: deps.sources.map((s) => ({
-        id: s.id, name: s.name, area: s.area, center: s.center, km: s.km, kinds: s.kinds, homepage: s.homepage, city: CITY_SOURCES.includes(s),
+        id: s.id, name: s.name, area: s.area, center: s.center, km: s.km, kinds: s.kinds, homepage: s.homepage, city: s.km < 1000,
         last_ok: states.get(s.id)?.last_ok || null, last_error: states.get(s.id)?.last_error || null,
         last_24h: counts.filter((n) => n.source === s.id).reduce((a, n) => a + n.n, 0),
       })),
@@ -308,6 +313,7 @@ export function createApp(deps: Deps) {
     return c.json({ ok: true, deleted: Boolean(d) })
   })
 
+  if (deps.community) mountCommunity(app, api, { store, community: deps.community, pusher })
   app.route('/api/v1', api)
 
   app.notFound((c) => page(c, messagePage(ctxOf(c), { title: 'Not found', message: 'Nothing lives at this address.' }), 404))
@@ -320,14 +326,22 @@ export async function serve(opts: { port?: number } = {}) {
   if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true })
   const store = new Store(dbPath)
   const pusher = createPusher(pushConfig(env), store)
-  const geo = new Geocoder(new Database(dbPath === ':memory:' ? ':memory:' : dbPath.replace(/\.db$/, '') + '-geocache.db', { create: true }))
+  const cacheDb = new Database(dbPath === ':memory:' ? ':memory:' : dbPath.replace(/\.db$/, '') + '-geocache.db', { create: true })
+  const geo = new Geocoder(cacheDb)
+  const sources = env.CHP === 'off' ? SOURCES : [...SOURCES, chpSource(cacheDb)]
   const radio = new RadioFinder()
-  const app = createApp({ store, sources: SOURCES, pusher, radio, premium: premiumConfig(env) })
+  const community = new Community(store.db, store, join(dirname(dbPath === ':memory:' ? './x' : dbPath), 'media'), {
+    maxBytes: Number(env.MEDIA_MAX_GB ?? 5) * 1024 ** 3,
+    ...(env.ADMIN_KEY ? { adminKey: env.ADMIN_KEY } : {}),
+    ...(env.COMMUNITY_SECRET ? { secret: env.COMMUNITY_SECRET } : {}),
+  })
+  setInterval(() => community.prune(30), 6 * 3600_000).unref?.()
+  const app = createApp({ store, sources, pusher, radio, premium: premiumConfig(env), community })
   // The relay hostname, so pit.world serves the Moshpit footer template.
   startPitFooterRefresh('resident.alerts.pit.world')
   startRingFooterRefresh()
   startRingRefresh()
-  if (env.WORKER !== 'off') startWorker({ store, sources: SOURCES, pusher, geo, log: console.log })
+  if (env.WORKER !== 'off') startWorker({ store, sources, pusher, geo, log: console.log })
   const port = opts.port ?? Number(env.PORT ?? 8806)
   return Bun.serve({ port, hostname: env.HOST ?? '127.0.0.1', fetch: app.fetch, idleTimeout: 30 })
 }

@@ -9,6 +9,7 @@ import type { Incident, Kind } from './sources.js'
 export const DEFAULT_URL = 'https://resident.alerts.pit.world'
 export type ApiIncident = Incident & { distance_km: number | null }
 export type ApiSource = { id: string; name: string; area: string; kinds: Kind[]; city: boolean; last_ok: number | null; last_error: string | null; last_24h: number }
+export type ApiPost = { id: string; name: string; text: string; media: { id: string; kind: string; url: string }[]; created_at: number }
 export type Query = { lat?: number; lon?: number; km?: number; hours?: number; kinds?: Kind[]; minSeverity?: 1 | 2 | 3; limit?: number }
 
 export class ApiError extends Error {
@@ -48,6 +49,12 @@ export class AlertsClient {
   }
   radio(lat: number, lon: number) {
     return this.get<Radio>(`/radio?lat=${lat}&lon=${lon}`)
+  }
+  async comments(id: string): Promise<ApiPost[]> {
+    return (await this.get<{ posts: ApiPost[] }>(`/incidents/${encodeURIComponent(id)}/comments`)).posts
+  }
+  async chat(lat: number, lon: number): Promise<ApiPost[]> {
+    return (await this.get<{ posts: ApiPost[] }>(`/chat?lat=${lat}&lon=${lon}`)).posts
   }
   async sources(): Promise<ApiSource[]> {
     return (await this.get<{ sources: ApiSource[] }>('/sources')).sources

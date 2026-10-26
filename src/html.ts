@@ -26,6 +26,7 @@ const asset = (name: string) => {
 }
 const STYLE_URL = asset('style.css')
 const SCRIPT_URL = asset('app.js')
+const COMMUNITY_URL = asset('community.js')
 const LEAFLET_CSS = asset('vendor/leaflet.css')
 const LEAFLET_JS = asset('vendor/leaflet.js')
 
@@ -76,6 +77,7 @@ ${o.map ? `<link rel="stylesheet" href="${LEAFLET_CSS}">` : ''}
 <link rel="stylesheet" href="${STYLE_URL}">
 ${o.map ? `<script src="${LEAFLET_JS}" defer></script>` : ''}
 <script src="${SCRIPT_URL}" defer></script>
+<script src="${COMMUNITY_URL}" defer></script>
 ${o.jsonLd ? `<script type="application/ld+json">${JSON.stringify(o.jsonLd).replace(/</g, '\\u003c')}</script>` : ''}
 ${TRACKER}
 </head>
@@ -115,11 +117,28 @@ export function homePage(ctx: Ctx, o: { latest: Incident[]; push: boolean; vapid
   <div id="map" class="map" role="region" aria-label="Map of incidents"></div>
   <div class="maptools">
     <button type="button" id="locate" class="fab" title="Center on me" aria-label="Center on me">◎</button>
+    <button type="button" id="report-open" class="fab report" title="Report what you see" aria-label="Report an incident">＋</button>
   </div>
+  <div class="crosshair" id="crosshair" hidden aria-hidden="true">✛</div>
+  <dialog class="report" id="report-dlg" aria-labelledby="report-h">
+    <form method="dialog" id="report-form">
+      <h3 id="report-h">Report what you see</h3>
+      <p class="muted small">It goes on the map as a resident report, unverified, until neighbors confirm it. In an emergency, call 911 first.</p>
+      <div class="chips" id="report-kinds">${kindChips('police')}</div>
+      <label>What is happening<input type="text" name="title" maxlength="80" required placeholder="Car fire on the shoulder"></label>
+      <label>Details (optional)<textarea name="detail" rows="3" maxlength="300" placeholder="What you saw, which way it is moving"></textarea></label>
+      <p class="muted small" id="report-where">Location: the middle of the map (the ✛). Move the map to place it.</p>
+      <div class="row wrap"><button type="button" class="btn ghost" id="report-here">Use where I am</button></div>
+      <div class="composer" id="report-media"></div>
+      <p class="status" id="report-status" role="status"></p>
+      <div class="row wrap"><button type="submit" class="btn primary" value="send">Post report</button><button type="button" class="btn ghost" id="report-cancel">Cancel</button></div>
+    </form>
+  </dialog>
   <section class="sheet" id="sheet" aria-label="Incidents">
     <button type="button" class="grab" id="grab" aria-label="Expand or collapse the list"><span></span></button>
     <div class="tabs" role="tablist">
       <button role="tab" class="tab on" data-tab="feed" aria-selected="true">Nearby</button>
+      <button role="tab" class="tab" data-tab="chat" aria-selected="false">💬 Chat</button>
       <button role="tab" class="tab" data-tab="radio" aria-selected="false">📻 Radio</button>
       <button role="tab" class="tab" data-tab="alerts" aria-selected="false">🔔 Alerts</button>
     </div>
@@ -135,6 +154,12 @@ export function homePage(ctx: Ctx, o: { latest: Incident[]; push: boolean; vapid
       <ol class="feed" id="feed">${o.latest.map((i) => incidentRow(i)).join('') || '<li class="empty">Nothing serious reported in the last day.</li>'}</ol>
       <p class="hint" id="hint">Showing the latest serious incidents in the ${o.sources} feeds we cover. Allow location, or move the map, to see what is near you.</p>
       <!--footers-->
+    </div>
+    <div class="pane" data-pane="chat" hidden>
+      <div class="chathead"><b id="chat-room">Chat for this area</b><span class="muted" id="chat-who"></span></div>
+      <ol class="posts" id="chat-posts"><li class="empty">Loading…</li></ol>
+      <div class="composer" id="chat-composer"></div>
+      <p class="hint">Talk with neighbors about what is happening around the middle of the map. Be kind; three flags hide a post. Photos lose their location data before upload.</p>
     </div>
     <div class="pane" data-pane="radio" hidden>
       <div id="radio"><p class="hint">Police and fire radio for the area in the middle of the map.</p></div>
@@ -191,8 +216,16 @@ export function incidentPage(ctx: Ctx, o: { i: Incident; nearby: (Incident & { d
     <a class="btn" href="/radio?lat=${i.lat}&amp;lon=${i.lon}">📻 Police and fire radio here</a>
     <button type="button" class="btn ghost" data-share="${esc(SITE)}/i/${esc(encodeURIComponent(i.id))}" data-title="${esc(i.title)}">Share</button>
   </p>
-  <p class="source">Source: <a href="${esc(i.url || o.source?.homepage || '#')}" rel="noopener" target="_blank">${esc(o.source?.name ?? i.source)}</a>. This is what the agency published; it is not confirmed by us, and the location of a dispatch is often a block or an intersection, not an exact address.</p>
+  ${i.source === 'community'
+    ? `<div class="reportbox" id="report-box" data-report="${esc(i.id)}"><p class="muted">A resident's report, not confirmed by any agency.</p></div>`
+    : `<p class="source">Source: <a href="${esc(i.url || o.source?.homepage || '#')}" rel="noopener" target="_blank">${esc(o.source?.name ?? i.source)}</a>. This is what the agency published; it is not confirmed by us, and the location of a dispatch is often a block or an intersection, not an exact address.</p>`}
 </article>
+<section class="comments" id="comments" data-incident="${esc(i.id)}">
+  <h2>Neighbors</h2>
+  <ol class="posts" id="comment-posts"><li class="empty">Loading comments…</li></ol>
+  <div class="composer" id="comment-composer"></div>
+  <noscript><p class="muted">Comments need JavaScript.</p></noscript>
+</section>
 ${o.nearby.length ? `<section><h2>Also near here, last 24 hours</h2><ol class="feed">${o.nearby.map((n) => incidentRow(n)).join('')}</ol></section>` : ''}`
   return layout({
     title: `${i.title}: ${i.address || i.area} · resident.alerts`,
@@ -228,11 +261,11 @@ export function radioPage(ctx: Ctx, o: { lat?: number; lon?: number; radio?: Rad
   const r = o.radio
   const list = r?.feeds.length
     ? `<ol class="feeds">${r.feeds
-        .map((f) => `<li class="${f.online ? '' : 'off'}"><a href="${esc(f.url)}" rel="noopener" target="_blank"><span class="live">${f.online ? '● live' : 'offline'}</span><b>${esc(f.name)}</b><span class="muted">${esc(f.genre)} · ${f.listeners} listening</span></a></li>`)
+        .map((f) => `<li class="${f.online ? '' : 'off'}"><a href="${esc(f.url)}" rel="noopener" target="_blank" data-listen="${esc(f.id)}" data-name="${esc(f.name)}"><span class="live">${f.online ? '▶ listen' : 'offline'}</span><b>${esc(f.name)}</b><span class="muted">${esc(f.genre)} · ${f.listeners} listening</span></a></li>`)
         .join('')}</ol>`
     : ''
   const body = `<h1>📻 Police and fire radio</h1>
-<p class="lede">Hear the dispatch channels for the county you are in. The audio is streamed by Broadcastify's volunteer scanner feeds; each one opens in their free player.</p>
+<p class="lede">Hear the dispatch channels for the county you are in. The audio is streamed by Broadcastify's volunteer scanner feeds: tap ▶ and it plays in their small player window, next to the map.</p>
 ${!o.lat ? `<p><button type="button" class="btn primary" data-radio-locate>Find radio near me</button></p><p class="muted">Or open it from any incident: every incident page has a radio button for that spot.</p>` : ''}
 ${o.error ? `<p class="error">${esc(o.error)}</p>` : ''}
 ${r ? `<h2>${esc(r.county)}, ${esc(r.stateCode)}</h2>${list || `<p>No scanner feeds are listed for ${esc(r.county)} yet.</p>`}<p class="row wrap">${r.countyUrl ? `<a class="btn ghost" href="${esc(r.countyUrl)}" rel="noopener" target="_blank">All feeds for ${esc(r.county)}</a>` : ''}<a class="btn ghost" href="${esc(r.browse)}" rel="noopener" target="_blank">Everything in ${esc(r.state)}</a></p>` : ''}
@@ -249,6 +282,7 @@ export function aboutPage(ctx: Ctx, price: string): string {
   <li>Live map and list of 911 incidents, weather warnings, earthquakes and wildfires, last 24 hours</li>
   <li>Push alerts for one place within 3 miles, each kind of call on or off, serious-only mode</li>
   <li>Police and fire radio for your county</li>
+  <li>Comments on every incident, a neighborhood chat, and your own reports with photos and videos (location data stripped before they go public)</li>
   <li>Shareable incident pages; an API, a command line, a terminal UI and an MCP server</li>
   <li>No ads. No account. No email or phone number. No selling your location</li>
 </ul>
@@ -263,7 +297,9 @@ export function aboutPage(ctx: Ctx, price: string): string {
 <p>Cities and counties publish their dispatched calls as open data. We read those feeds every few minutes (see <a href="/coverage">coverage</a>), put each call on the map, and check it against the places devices asked about. Your places are stored with your device's push subscription and nothing else: no name, no account. Turn alerts off and they are deleted.</p>
 <p>Your location stays in your browser. The map asks our server for incidents in the area on screen; it never sends where you are standing unless you add it as a place.</p>
 <h2>What it is not</h2>
-<p>Not an emergency service. If you need help, call 911. Dispatch data is preliminary: call types change, locations are often a block or an intersection, and some calls are withheld by the agency for privacy.</p>
+<p>Not an emergency service. If you need help, call 911. Dispatch data is preliminary: call types change, locations are often a block or an intersection, and some calls are withheld by the agency for privacy. Resident reports are what neighbors posted: they are marked unverified, alert nobody until two other residents confirm them, and disappear after three flags.</p>
+<h2>Community rules</h2>
+<p>Pseudonyms, no accounts. Do not post faces of victims, license plates, home addresses or anything that puts someone at risk. No harassment, no vigilantism, no spam. Three flags hide a post; abusive names are banned with the network they posted from.</p>
 <h2>Open source</h2>
 <p>The code is MIT-licensed at <a href="${REPO}">${REPO.replace('https://', '')}</a>. resident.alerts is a Moshpit name; on the old internet it is <a href="${SITE}">${SITE.replace('https://', '')}</a>.</p>
 <p><a class="btn ghost" href="/api">API, CLI and MCP</a></p>
@@ -288,7 +324,14 @@ bunx @profullstack/residentalerts radio 29.76 -95.37
 bunx @profullstack/residentalerts watch 47.61 -122.33   # live terminal view</code></pre>
 <h2>MCP</h2>
 <pre><code>claude mcp add residentalerts -- bunx @profullstack/residentalerts mcp</code></pre>
-<p>Tools: <code>incidents_near</code>, <code>serious_incidents</code>, <code>get_incident</code>, <code>radio_near</code>, <code>coverage</code>.</p>`
+<p>Tools: <code>incidents_near</code>, <code>serious_incidents</code>, <code>get_incident</code>, <code>radio_near</code>, <code>incident_comments</code>, <code>area_chat</code>, <code>coverage</code>.</p>
+<h2>Community API</h2>
+<pre><code>POST /api/v1/residents {"name":"Tony"}          -> { token: "rt_…" }   (send as Authorization: Bearer rt_…)
+GET|POST /api/v1/incidents/&lt;id&gt;/comments {"text","media":[ids]}
+GET|POST /api/v1/chat?lat=&amp;lon= {"lat","lon","text","media"}
+POST /api/v1/media  (multipart "file": photo up to 10 MB, video up to 25 MB)
+POST /api/v1/reports {"kind","title","detail","lat","lon","media"}
+POST /api/v1/reports/&lt;id&gt;/confirm · POST /api/v1/flag {"target":"post:&lt;id&gt;"}</code></pre>`
   return layout({ title: 'API, CLI and MCP · resident.alerts', description: 'Open JSON API, command line, terminal UI and MCP server for live 911 incidents.', path: '/api', body, ctx })
 }
 

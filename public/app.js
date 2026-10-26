@@ -150,9 +150,12 @@
       clearTimeout(t)
       t = setTimeout(load, 350)
       if (state.tab === 'radio') radioSoon()
+      if (state.tab === 'chat' && window.raChat) window.raChat.moved()
     })
     map.on('click', () => hideDetail())
     drawPlaces()
+    // community.js reads the map through this.
+    window.raApp = { map, center: () => [map.getCenter().lat, map.getCenter().lng], me: () => state.me, locate, reload: load, show: (i) => showDetail(i) }
     load()
     setInterval(() => document.visibilityState === 'visible' && load(), 60000)
     // Already allowed before? Centre on the visitor without asking again.
@@ -257,11 +260,11 @@
     const d = $('detail')
     const from = state.me
     d.innerHTML = `<button class="x" type="button" aria-label="Close">×</button>
-<p class="kicker">${KIND_ICON[i.kind]} ${KIND_LABEL[i.kind]}${i.severity === 3 ? ' · <b style="color:var(--accent)">serious</b>' : ''} · ${ago(i.at)}${from && !i.shape ? ' · ' + miles(toKm(from, [i.lat, i.lon])) : ''}</p>
+<p class="kicker">${KIND_ICON[i.kind]} ${KIND_LABEL[i.kind]}${i.source === 'community' ? ' · resident report' : ''}${i.severity === 3 ? ' · <b style="color:var(--accent)">serious</b>' : ''} · ${ago(i.at)}${from && !i.shape ? ' · ' + miles(toKm(from, [i.lat, i.lon])) : ''}</p>
 <h3>${esc(i.title)}</h3>
 <p class="where">${esc(i.address || i.area)}</p>
 ${i.detail ? `<p class="muted" style="margin:.2rem 0 .6rem;font-size:.88rem">${esc(i.detail)}</p>` : ''}
-<div class="row wrap"><a class="btn primary" href="/i/${encodeURIComponent(i.id)}">Details</a><a class="btn" href="/radio?lat=${i.lat}&lon=${i.lon}">📻 Radio</a><button type="button" class="btn ghost" data-share-now>Share</button></div>`
+<div class="row wrap"><a class="btn primary" href="/i/${encodeURIComponent(i.id)}">💬 Details and comments</a><a class="btn" href="/radio?lat=${i.lat}&lon=${i.lon}">📻 Radio</a><button type="button" class="btn ghost" data-share-now>Share</button></div>`
     d.hidden = false
     d.querySelector('.x').onclick = hideDetail
     d.querySelector('[data-share-now]').onclick = async (e) => {
@@ -326,6 +329,7 @@ ${i.detail ? `<p class="muted" style="margin:.2rem 0 .6rem;font-size:.88rem">${e
       for (const p of document.querySelectorAll('.pane')) p.hidden = p.dataset.pane !== state.tab
       if (state.tab === 'radio') radio()
       if (state.tab === 'alerts') alertsInit()
+      if (window.raChat) state.tab === 'chat' ? window.raChat.open() : window.raChat.close()
     })
   }
 
@@ -345,9 +349,9 @@ ${i.detail ? `<p class="muted" style="margin:.2rem 0 .6rem;font-size:.88rem">${e
       const r = await getJSON(`/api/v1/radio?lat=${c.lat.toFixed(4)}&lon=${c.lng.toFixed(4)}`)
       const feeds = r.feeds.filter((f) => f.online).slice(0, 12)
       el.innerHTML = `<h3 style="margin:.4rem 0">${esc(r.county)}, ${esc(r.stateCode)}</h3>
-${feeds.length ? `<ol class="feeds">${feeds.map((f) => `<li><a href="${esc(f.url)}" target="_blank" rel="noopener"><span class="live">● live</span><b>${esc(f.name)}</b><span class="muted">${esc(f.genre)} · ${f.listeners} listening</span></a></li>`).join('')}</ol>` : `<p class="hint">No live scanner feeds for ${esc(r.county)} right now.</p>`}
+${feeds.length ? `<ol class="feeds">${feeds.map((f) => `<li><a href="${esc(f.url)}" target="_blank" rel="noopener" data-listen="${esc(f.id)}" data-name="${esc(f.name)}"><span class="live">▶ listen</span><b>${esc(f.name)}</b><span class="muted">${esc(f.genre)} · ${f.listeners} listening</span></a></li>`).join('')}</ol>` : `<p class="hint">No live scanner feeds for ${esc(r.county)} right now.</p>`}
 <p class="row wrap">${r.countyUrl ? `<a class="btn ghost" href="${esc(r.countyUrl)}" target="_blank" rel="noopener">All ${esc(r.county)} feeds</a>` : ''}<a class="btn ghost" href="${esc(r.browse)}" target="_blank" rel="noopener">All of ${esc(r.state)}</a></p>
-<p class="hint">Feeds stream from Broadcastify's free player in a new tab. Move the map to hear another county.</p>`
+<p class="hint">Tap ▶ and the feed plays in Broadcastify's small player window (their streams cannot play inside other sites). Move the map to hear another county.</p>`
     } catch (e) {
       radioKey = ''
       el.innerHTML = `<p class="hint">${esc(e.message === 'radio listings cover the US only' ? 'Radio listings cover the US only. Move the map to a US county.' : 'Could not load radio: ' + e.message)}</p>`
