@@ -33,6 +33,38 @@ email account can connect CoinPay from `/account`.
 `MAIL_FROM`); `GET /api/v1/admin/emails` (x-admin-key) exports the opt-in list
 as CSV.
 
+## Credit codes and invites
+
+**Credit codes** ([`@profullstack/redeem-credits`](https://github.com/profullstack/redeem-credits)):
+a code grants the unit `premium`; one with amount 1 is lifetime Premium, the
+same thing $4.99 buys. A signed-in person redeems it under "Have a code?" on
+`/account` (or `POST /api/v1/redeem {"code"}` with the session cookie). The
+credit is applied the way a purchase is: a settled $0 row in `payments`
+(chain `credit-code`) on the account, so Premium has one source of truth and
+moves with the account on a merge. Someone who already has Premium is refused
+before the code is spent. Mint one on the server (run the bin under bun; its
+node shebang fails as root):
+
+```sh
+cd /opt/resident.alerts
+bun $(readlink -f node_modules/.bin/redeem-credits) mint --db "$DATABASE_PATH" \
+  --unit premium --amount 1 --label "for Dan" [--max 10] [--expires 30d]
+bun $(readlink -f node_modules/.bin/redeem-credits) list   --db "$DATABASE_PATH"
+bun $(readlink -f node_modules/.bin/redeem-credits) revoke <codeId> --db "$DATABASE_PATH"
+```
+
+A `grant --unit premium --amount 1 --user <account id>` works too: it switches
+on the next time that person opens `/account`.
+
+**Invites** ([`@profullstack/affiliates`](https://github.com/profullstack/affiliates)):
+three single-use links per account at `/invites` (`GET/POST /api/v1/invites`).
+A link lands on `/invite/<code>` (`/i/` is an incident page), rides in a 7-day
+cookie, and is spent when that browser makes a **new** account (email link or
+CoinPay). Premium is lifetime-only and there is nothing smaller to give, so an
+invite gives neither person anything beyond the invite: we only remember who
+brought whom. Every account also has an affiliate link (`/?ref=<code>`),
+remembered first-touch for 30 days and credited to new accounts.
+
 ## Community
 
 Residents (`rt_` token + name, tied to an account): comments on every

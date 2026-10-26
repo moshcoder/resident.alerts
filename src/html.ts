@@ -297,6 +297,8 @@ export function aboutPage(ctx: Ctx, price: string): string {
   <li>Shareable incident pages; an API, a command line, a terminal UI and an MCP server</li>
   <li>No ads. No selling your location. The map, radio and one alert place need no account at all</li>
 </ul>
+<h2>Codes and invites</h2>
+<p>A credit code someone gave you goes in <a href="/account">your account</a> under "Have a code?": a Premium code switches on lifetime Premium, the same as buying it. Every account also has three single-use invite links (<a href="/invites">Invites</a>) and a link of its own to share.</p>
 <h2>Accounts</h2>
 <p>Sign in with CoinPay, or with just your email (a one-time link, no password), to post, comment and share photos and videos, and to keep Premium and your alert places on every device. We email you sign-in links, Premium receipts and, only if you leave the box ticked, a few updates a year.</p>
 <h2>Premium: ${esc(price)} once, for life</h2>
@@ -425,7 +427,12 @@ ${o.flash ? `<p class="ok">${esc(o.flash)}</p>` : ''}${o.error ? `<p class="erro
   ${o.premium
     ? `<p>Premium is on${o.since ? ` since ${esc(new Date(o.since).toISOString().slice(0, 10))}` : ''}: up to 25 alert places, 50 miles each, 30 days of history, on every device you sign in on.</p>`
     : `<p>1 alert place within 3 miles, 24 hours of history. <a class="btn primary" href="/premium">Get Premium for ${esc(o.price)}, once</a></p>
-<form method="post" action="/account" class="row wrap"><input type="hidden" name="action" value="key"><input type="text" name="key" placeholder="Have a Premium key? ra_…" autocomplete="off" spellcheck="false" aria-label="Premium key"><button class="btn">Attach it</button></form>`}
+<form method="post" action="/account" class="row wrap"><input type="hidden" name="action" value="key"><input type="text" name="key" placeholder="Have a Premium key? ra_…" autocomplete="off" spellcheck="false" aria-label="Premium key"><button class="btn">Attach it</button></form>
+<form method="post" action="/account" class="row wrap"><input type="hidden" name="action" value="redeem"><input type="text" name="code" placeholder="Have a code? CR-XXXX-XXXX-XXXX-XXXX" autocomplete="off" spellcheck="false" aria-label="Credit code"><button class="btn">Redeem</button></form>`}
+</section>
+<section class="card">
+  <h2>Invites</h2>
+  <p>You have a few single-use invite links to give to people you think would want this. <a href="/invites">Your invites</a></p>
 </section>
 <section class="card">
   <h2>Alert places</h2>
@@ -451,6 +458,43 @@ ${o.coinpayOn ? `<section class="card"><h2>CoinPay</h2>${o.coinpay ? '<p>✓ Con
   <form method="post" action="/account"><input type="hidden" name="action" value="delete"><label class="check"><input type="checkbox" name="sure" value="1"> Yes, delete my email, saved places and Premium on this account</label><button class="btn">Delete</button></form>
 </details>`
   return layout({ title: 'Account · resident.alerts', description: 'Your resident.alerts account.', path: '/account', noindex: true, body, ctx })
+}
+
+/** Where an invite link lands: the invite rides in a cookie until they sign up. */
+export function invitedPage(ctx: Ctx): string {
+  const body = `<p class="muted">Invite</p>
+<h1>You're invited to resident.alerts.</h1>
+<p class="lede">Someone thought you should have this: a live map of what police, fire and paramedics are being sent to near you, with a push the moment something happens near the places you care about.</p>
+${ctx.user
+    ? '<p class="muted">You already have an account, so this invite is for someone new. Pass it on.</p><p><a class="btn" href="/">Back to the map</a></p>'
+    : '<p><a class="btn primary" href="/signin?next=/account">Accept: make your account</a></p><p class="muted">The invite counts when you make a new account in the next 7 days. The map, radio and one alert place never need one.</p>'}`
+  return layout({ title: "You're invited · resident.alerts", description: 'An invite to resident.alerts.', path: '/', noindex: true, body, ctx })
+}
+
+export type InvitesView = {
+  quota: { total: number; used: number; left: number }
+  invites: { id: string; createdAt: number; expiresAt: number | null; usedAt: number | null; note: string }[]
+  affiliate: string
+  link?: string
+  error?: string
+}
+
+export function invitesPage(ctx: Ctx, o: InvitesView): string {
+  const day = (t: number) => new Date(t).toISOString().slice(0, 10)
+  const body = `<h1>Invites</h1>
+${o.error ? `<p class="error">${esc(o.error)}</p>` : ''}
+<p class="lede">You have <b>${o.quota.left}</b> of ${o.quota.total} invite links left. Each works once, for someone who makes a new account through it.</p>
+<p class="muted">An invite is just that: a way in, from you. It does not unlock Premium for either of you.</p>
+${o.link ? `<p class="ok">Your new invite link, shown once:</p><pre><code>${esc(o.link)}</code></pre>` : ''}
+${o.quota.left > 0 ? `<form method="post" action="/invites" class="row wrap"><input type="text" name="note" maxlength="80" placeholder="Who is it for? (only you see this)" aria-label="Note"><button class="btn primary">Make an invite link</button></form>` : ''}
+${o.invites.length ? `<ul>${o.invites.map((i) => `<li>${esc(i.note || 'invite')} <span class="muted">${i.usedAt ? `used ${day(i.usedAt)}` : i.expiresAt && i.expiresAt < Date.now() ? 'expired' : `open, made ${day(i.createdAt)}`}</span></li>`).join('')}</ul>` : ''}
+<section class="card">
+  <h2>Your link for everyone else</h2>
+  <p>Share it anywhere. People who make an account after arriving through it are counted as yours.</p>
+  <pre><code>${esc(o.affiliate)}</code></pre>
+</section>
+<p><a class="btn" href="/account">Back to your account</a></p>`
+  return layout({ title: 'Invites · resident.alerts', description: 'Your invite links.', path: '/invites', noindex: true, body, ctx })
 }
 
 export function messagePage(ctx: Ctx, o: { title: string; message: string; status?: number }): string {
