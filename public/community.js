@@ -242,7 +242,7 @@ ${r.mine ? '' : `<button type="button" class="btn" id="rb-confirm"${r.confirmed 
     })
     $('report-cancel').addEventListener('click', close)
     $('report-here').addEventListener('click', async () => {
-      const me = await window.raApp.locate(true)
+      const me = await window.raApp.locate({ fly: true })
       if (me) { at = me; $('report-where').textContent = 'Location: where you are now.' }
     })
     $('report-form').addEventListener('submit', async (e) => {

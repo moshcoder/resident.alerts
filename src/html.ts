@@ -121,6 +121,7 @@ export function homePage(ctx: Ctx, o: { latest: Incident[]; push: boolean; vapid
     <button type="button" id="report-open" class="fab report" title="Report what you see" aria-label="Report an incident">＋</button>
   </div>
   <div class="crosshair" id="crosshair" hidden aria-hidden="true">✛</div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   <dialog class="report" id="report-dlg" aria-labelledby="report-h">
     <form method="dialog" id="report-form">
       <h3 id="report-h">Report what you see</h3>

@@ -62,8 +62,8 @@
       radioBtn.textContent = 'Finding you…'
       navigator.geolocation.getCurrentPosition(
         (p) => { location.href = `/radio?lat=${p.coords.latitude.toFixed(4)}&lon=${p.coords.longitude.toFixed(4)}` },
-        () => { radioBtn.disabled = false; radioBtn.textContent = 'Location is blocked: allow it and try again' },
-        { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 },
+        (e) => { radioBtn.disabled = false; radioBtn.textContent = e.code === 1 ? 'Location is off for this site: allow it, then tap again' : 'Could not find you yet: tap to try again' },
+        { enableHighAccuracy: false, timeout: 20000, maximumAge: 600000 },
       )
     })
   }
@@ -152,8 +152,11 @@
 
   addEventListener('load', () => {
     if (!window.L) return
-    const start = params.get('lat') ? [Number(params.get('lat')), Number(params.get('lon'))] : view ? view.c : [39.5, -98.35]
-    const zoom = params.get('z') ? Number(params.get('z')) : view ? view.z : 4
+    // Where to open: a link's spot, else where you were last seen (if you allowed location), else your last view.
+    const lastMe = store.get('me', null)
+    const fromMe = !params.get('lat') && store.get('locOK', false) && lastMe
+    const start = params.get('lat') ? [Number(params.get('lat')), Number(params.get('lon'))] : fromMe ? [lastMe.lat, lastMe.lon] : view ? view.c : [39.5, -98.35]
+    const zoom = params.get('z') ? Number(params.get('z')) : fromMe ? Math.max(view?.z ?? 13, 12) : view ? view.z : 4
     const map = baseMap('map', { center: start, zoom })
     L.control.zoom({ position: 'topright' }).addTo(map)
     state.map = map
@@ -174,30 +177,95 @@
     window.raApp = { map, center: () => [map.getCenter().lat, map.getCenter().lng], me: () => state.me, locate, reload: load, show: (i) => showDetail(i) }
     load()
     setInterval(() => document.visibilityState === 'visible' && load(), 60000)
-    // Already allowed before? Centre on the visitor without asking again.
-    if (!params.get('lat') && navigator.permissions) {
-      navigator.permissions.query({ name: 'geolocation' }).then((p) => p.state === 'granted' && locate(!view)).catch(() => {})
-    }
+    if (fromMe) placeMe([lastMe.lat, lastMe.lon])
+    // Find you on every visit once you have allowed it (Safari often reports "prompt" even after Allow, so we
+    // remember that you said yes ourselves); a first-time visitor is asked straight away, once.
+    const allowed = navigator.permissions ? navigator.permissions.query({ name: 'geolocation' }).then((p) => p.state).catch(() => 'unknown') : Promise.resolve('unknown')
+    allowed.then((perm) => {
+      if (params.get('lat') || perm === 'denied') return
+      if (perm === 'granted' || store.get('locOK', false)) locate({ fly: !fromMe || perm === 'granted', quiet: true })
+      else if (!view && !store.get('locAsked', false)) { store.set('locAsked', true); locate({ fly: true }) }
+    })
   })
 
-  function locate(fly = true) {
+  function toast(msg, ms = 6000) {
+    const t = $('toast')
+    if (!t) return
+    t.textContent = msg
+    t.hidden = !msg
+    clearTimeout(toast.t)
+    if (msg && ms) toast.t = setTimeout(() => (t.hidden = true), ms)
+  }
+  function placeMe(at, accuracy) {
+    state.me = at
+    $('locate').classList.add('on')
+    if (state.meMarker) state.meMarker.setLatLng(at)
+    else state.meMarker = L.marker(at, { icon: L.divIcon({ className: '', html: '<div class="pin me"></div>', iconSize: [16, 16], iconAnchor: [8, 8] }), interactive: false, zIndexOffset: 1000 }).addTo(state.map)
+    if (accuracy && accuracy < 2000) {
+      if (state.meRing) state.meRing.setLatLng(at).setRadius(accuracy)
+      else state.meRing = L.circle(at, { radius: accuracy, color: '#0a84ff', weight: 1, fillOpacity: 0.08, interactive: false }).addTo(state.map)
+    }
+  }
+  const IOS = /iphone|ipad|ipod/i.test(navigator.userAgent)
+  const why = (e) =>
+    e && e.code === 1
+      ? IOS
+        ? 'Location is off for this site. On iPhone: Settings → Privacy & Security → Location Services → Safari Websites → While Using, then reload.'
+        : 'Location is off for this site. Click the lock or tune icon next to the address and allow Location, then reload.'
+      : e && e.code === 2
+        ? 'Your device could not work out where it is. Turn on Wi-Fi or GPS and tap ◎ again.'
+        : 'Finding your location is taking a while. Tap ◎ to try again.'
+
+  /**
+   * Find the visitor: a quick fix first (Wi-Fi/cell, recent is fine), then a
+   * precise one if that fails, then ~30 s of quiet GPS refinement. The result is
+   * remembered so the next visit opens on you.
+   */
+  let watchId = null
+  function locate(opts = {}) {
+    const { fly = true, quiet = false } = typeof opts === 'boolean' ? { fly: opts } : opts
     return new Promise((resolve) => {
-      if (!navigator.geolocation) return resolve(null)
-      navigator.geolocation.getCurrentPosition(
-        (p) => {
-          state.me = [p.coords.latitude, p.coords.longitude]
-          $('locate').classList.add('on')
-          if (state.meMarker) state.meMarker.setLatLng(state.me)
-          else state.meMarker = L.marker(state.me, { icon: L.divIcon({ className: '', html: '<div class="pin me"></div>', iconSize: [16, 16], iconAnchor: [8, 8] }), interactive: false, zIndexOffset: 1000 }).addTo(state.map)
-          if (fly) state.map.setView(state.me, Math.max(state.map.getZoom(), 13))
-          resolve(state.me)
-        },
-        () => { $('hint').textContent = 'Location is blocked for this site. Move the map to any city instead.'; resolve(null) },
-        { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 },
-      )
+      if (!navigator.geolocation) { toast('This browser cannot share its location. Move the map to your area instead.'); return resolve(null) }
+      if (!quiet) toast('Finding you…', 0)
+      let done = false
+      // An unanswered permission prompt never calls back: do not leave "Finding you…" up forever.
+      const giveUp = setTimeout(() => { if (!done) { done = true; if (!quiet) toast(why({ code: 3 }), 12000); resolve(null) } }, 40000)
+      const got = (p) => {
+        clearTimeout(giveUp)
+        done = true
+        const at = [p.coords.latitude, p.coords.longitude]
+        placeMe(at, p.coords.accuracy)
+        store.set('me', { lat: +at[0].toFixed(5), lon: +at[1].toFixed(5), at: Date.now() })
+        store.set('locOK', true)
+        if (fly) state.map.setView(at, Math.max(state.map.getZoom(), 13))
+        toast('')
+        refine()
+        resolve(at)
+      }
+      const fail = (e) => {
+        clearTimeout(giveUp)
+        if (done) return
+        done = true
+        if (e && e.code === 1) store.set('locOK', false)
+        if (!quiet || (e && e.code === 1)) toast(why(e), 12000)
+        resolve(null)
+      }
+      navigator.geolocation.getCurrentPosition(got, (e) => {
+        if (e.code === 1) return fail(e)
+        navigator.geolocation.getCurrentPosition(got, fail, { enableHighAccuracy: true, timeout: 25000, maximumAge: 0 })
+      }, { enableHighAccuracy: false, timeout: 10000, maximumAge: 10 * 60000 })
     })
   }
-  $('locate').addEventListener('click', () => locate(true))
+  function refine() {
+    if (watchId !== null || !navigator.geolocation.watchPosition) return
+    watchId = navigator.geolocation.watchPosition((p) => {
+      const at = [p.coords.latitude, p.coords.longitude]
+      placeMe(at, p.coords.accuracy)
+      store.set('me', { lat: +at[0].toFixed(5), lon: +at[1].toFixed(5), at: Date.now() })
+    }, () => {}, { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 })
+    setTimeout(() => { navigator.geolocation.clearWatch(watchId); watchId = null }, 30000)
+  }
+  $('locate').addEventListener('click', () => locate({ fly: true }))
 
   async function load() {
     const map = state.map
@@ -450,7 +518,7 @@ ${feeds.length ? `<ol class="feeds">${feeds.map((f) => `<li><a href="${esc(f.url
   $('add-here').addEventListener('click', async () => {
     if (!roomForPlace()) return
     status('Finding you…')
-    const me = await locate(true)
+    const me = await locate({ fly: true })
     if (!me) return status('Location is blocked. Use "Add the map\'s center" instead.')
     state.places.push({ name: askPlaceName(state.places.length ? 'Place ' + (state.places.length + 1) : 'Home'), lat: +me[0].toFixed(5), lon: +me[1].toFixed(5), km: 1.6 })
     status('')
@@ -495,7 +563,7 @@ ${feeds.length ? `<ol class="feeds">${feeds.map((f) => `<li><a href="${esc(f.url
     try {
       if (!state.places.length) {
         status('Finding you, to add your first place…')
-        const me = await locate(true)
+        const me = await locate({ fly: true })
         if (me) state.places.push({ name: 'Home', lat: +me[0].toFixed(5), lon: +me[1].toFixed(5), km: 1.6 })
         else return status('Add a place first: allow location, or use "Add the map\'s center".')
         store.set('places', state.places)
