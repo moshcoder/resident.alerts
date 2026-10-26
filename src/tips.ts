@@ -12,10 +12,11 @@ import type { Store } from './db.js'
 
 export type CoinPay = { baseUrl: string; apiKey: string; businessId: string; webhookSecret: string }
 export const TIP_AMOUNTS = [3, 10, 25, 100]
-export const DEFAULT_CHAINS = ['USDC_SOL', 'USDC_POL', 'USDC_ETH', 'BTC', 'ETH', 'SOL', 'POL', 'DOGE', 'LTC']
+// What the resident.alerts CoinPay business can be paid in (coinpay-onboard lists them).
+export const DEFAULT_CHAINS = ['USDC_SOL', 'USDC_BASE', 'USDC_POL', 'USDC_ETH', 'BTC', 'ETH', 'SOL', 'POL', 'DOGE', 'XRP']
 export const CHAIN_LABELS: Record<string, string> = {
-  USDC_POL: 'USDC on Polygon', USDC_SOL: 'USDC on Solana', USDC_ETH: 'USDC on Ethereum', USDT_POL: 'USDT on Polygon',
-  BTC: 'Bitcoin', ETH: 'Ether', SOL: 'Solana', POL: 'Polygon', DOGE: 'Dogecoin', LTC: 'Litecoin', BCH: 'Bitcoin Cash', XRP: 'XRP', ADA: 'Cardano', BNB: 'BNB',
+  USDC_POL: 'USDC on Polygon', USDC_SOL: 'USDC on Solana', USDC_ETH: 'USDC on Ethereum', USDC_BASE: 'USDC on Base', USDT_POL: 'USDT on Polygon',
+  BTC: 'Bitcoin', ETH: 'Ether', SOL: 'Solana', POL: 'Polygon', DOGE: 'Dogecoin', BCH: 'Bitcoin Cash', XRP: 'XRP', ADA: 'Cardano', BNB: 'BNB',
 }
 
 export function coinpayConfig(env: Record<string, string | undefined> = process.env): { coinpay: CoinPay | null; chains: string[] } {
