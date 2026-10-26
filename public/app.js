@@ -75,6 +75,61 @@
     return map
   }
 
+  // How an area is drawn: fire perimeters red-orange, evacuation zones by level, red flag warnings red, other NWS areas purple.
+  const areaStyle = (i) =>
+    i.source === 'wildfires' ? { color: '#ff6a00', weight: 2, fillColor: '#ff3b30', fillOpacity: 0.28 }
+      : i.source === 'evac' ? { color: i.severity >= 3 ? '#ff2d55' : i.severity === 2 ? '#ff9f0a' : '#ffd60a', weight: 1.5, dashArray: '4 3', fillOpacity: i.severity >= 3 ? 0.25 : 0.14 }
+        : /red flag|fire weather|fire warning/i.test(i.title) ? { color: '#ff375f', weight: 1.5, fillOpacity: 0.07 }
+          : { color: '#8e6cff', weight: 1.5, fillOpacity: i.severity >= 3 ? 0.18 : 0.08 }
+
+  // Wind, humidity and air quality at a fire, from the nearest NWS station and AirNow monitor.
+  async function fillConditions(el) {
+    if (!el) return
+    try {
+      const c = await getJSON(`/api/v1/conditions?lat=${Number(el.dataset.lat).toFixed(3)}&lon=${Number(el.dataset.lon).toFixed(3)}`)
+      const parts = []
+      if (c.wind_mph !== null && c.wind_mph < 1 && !c.gust_mph) parts.push('Wind calm')
+      else if (c.wind_mph !== null) parts.push(`<span title="Wind comes from the ${esc(c.wind_from || '')}"><b class="windarrow" style="transform:rotate(${(c.wind_from_deg ?? 0) + 180}deg)">↑</b> ${c.wind_mph} mph${c.wind_from ? ' from ' + esc(c.wind_from) : ''}${c.gust_mph ? `, gusts ${c.gust_mph}` : ''}</span>`)
+      if (c.humidity !== null) parts.push(`💧 ${c.humidity}% humidity`)
+      if (c.temp_f !== null) parts.push(`🌡 ${c.temp_f}°F`)
+      if (c.aqi !== null) parts.push(`<span class="aqi aqi-${c.aqi <= 50 ? 1 : c.aqi <= 100 ? 2 : c.aqi <= 150 ? 3 : c.aqi <= 200 ? 4 : 5}">AQI ${c.aqi} ${esc(c.aqi_label)}</span>`)
+      if (!parts.length) { el.hidden = true; return }
+      el.innerHTML = `${c.fire_weather ? '<b class="fw">⚠️ Fire weather: dry and windy</b> ' : ''}${parts.join(' · ')}<span class="muted small"> · ${esc(c.station || 'NWS')}${c.observed_at ? ', ' + ago(c.observed_at) : ''}${c.aqi_site ? ' · air: ' + esc(c.aqi_site) : ''}</span>`
+      el.hidden = false
+    } catch { el.hidden = true }
+  }
+  for (const el of document.querySelectorAll('[data-conditions]')) fillConditions(el)
+
+  // Follow an incident (a fire, mostly): its growth, containment and end come as pushes to this device.
+  const following = () => new Set(store.get('follows', []))
+  async function pushSub() {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return null
+    const reg = await navigator.serviceWorker.ready
+    return reg.pushManager.getSubscription()
+  }
+  function bindFollow(btn) {
+    if (!btn) return
+    const id = btn.dataset.follow
+    const paint = () => { const on = following().has(id); btn.textContent = on ? '🔔 Following ✓' : '🔔 Follow'; btn.setAttribute('aria-pressed', String(on)) }
+    paint()
+    btn.addEventListener('click', async () => {
+      const sub = await pushSub().catch(() => null)
+      if (!sub) {
+        btn.textContent = 'Turn on alerts first'
+        if (location.pathname !== '/') setTimeout(() => (location.href = '/#alerts'), 900)
+        else document.querySelector('.tab[data-tab="alerts"]')?.click()
+        return
+      }
+      const on = !following().has(id)
+      try {
+        const r = await getJSON('/api/v1/devices/follow', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: sub.endpoint, auth: sub.toJSON().keys.auth, id, follow: on }) })
+        store.set('follows', r.follows)
+        paint()
+      } catch (e) { btn.textContent = e.message }
+    })
+  }
+  for (const b of document.querySelectorAll('[data-follow]')) bindFollow(b)
+
   const mini = $('mini')
   if (mini) {
     addEventListener('load', () => {
@@ -83,8 +138,9 @@
       const map = baseMap(mini, { center: at, zoom: 15, scrollWheelZoom: false })
       if (mini.dataset.shape) {
         const rings = JSON.parse(mini.dataset.shape)
-        const poly = L.polygon(rings, { color: '#8e6cff', weight: 2, fillOpacity: 0.15 }).addTo(map)
+        const poly = L.polygon(rings, areaStyle({ source: mini.dataset.source, severity: Number(mini.dataset.severity), title: mini.dataset.title || '' })).addTo(map)
         map.fitBounds(poly.getBounds(), { padding: [20, 20] })
+        if (mini.dataset.source === 'wildfires') L.marker(at, { icon: pinIcon({ kind: 'fire', severity: 3 }, false) }).addTo(map)
       } else L.marker(at, { icon: pinIcon({ kind: mini.dataset.kind, severity: 3 }, true) }).addTo(map)
     })
   }
@@ -163,11 +219,12 @@
     state.layer = L.layerGroup().addTo(map)
     state.shapes = L.layerGroup().addTo(map)
     state.placeLayer = L.layerGroup().addTo(map)
+    state.heat = L.layerGroup().addTo(map)
     let t = null
     map.on('moveend', () => {
       store.set('view', { c: [map.getCenter().lat, map.getCenter().lng], z: map.getZoom() })
       clearTimeout(t)
-      t = setTimeout(load, 350)
+      t = setTimeout(() => { load(); if (state.hot) hotspots() }, 350)
       if (state.tab === 'radio') radioSoon()
       if (state.tab === 'chat' && window.raChat) window.raChat.moved()
     })
@@ -267,6 +324,37 @@
   }
   $('locate').addEventListener('click', () => locate({ fly: true }))
 
+  // ---- satellite hotspots ---------------------------------------------------------------
+  state.hot = store.get('hot', false)
+  const hotBtn = $('hotspots')
+  const paintHot = () => { hotBtn.classList.toggle('on', state.hot); hotBtn.setAttribute('aria-pressed', String(state.hot)) }
+  paintHot()
+  hotBtn.addEventListener('click', () => {
+    state.hot = !state.hot
+    store.set('hot', state.hot)
+    paintHot()
+    if (state.hot) { toast('Satellite heat detections (VIIRS), last 48 hours: red is under 6 hours old.', 5000); hotspots() } else state.heat.clearLayers()
+  })
+  let hotKey = ''
+  async function hotspots() {
+    const map = state.map
+    if (!map || !state.hot) return
+    const b = map.getBounds()
+    const box = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].map((v) => v.toFixed(2))
+    if (map.getZoom() < 6) { state.heat.clearLayers(); hotKey = ''; return toast('Zoom in to see satellite hotspots.', 4000) }
+    const key = box.join(',')
+    if (key === hotKey) return
+    hotKey = key
+    try {
+      const r = await getJSON(`/api/v1/hotspots?s=${box[0]}&w=${box[1]}&n=${box[2]}&e=${box[3]}`)
+      state.heat.clearLayers()
+      for (const h of r.hotspots) {
+        const color = h.hours < 6 ? '#ff2d00' : h.hours < 24 ? '#ff9500' : '#ffd60a'
+        L.circleMarker([h.lat, h.lon], { radius: map.getZoom() >= 11 ? 6 : 4, stroke: false, fillColor: color, fillOpacity: h.hours < 6 ? 0.9 : 0.6, interactive: false }).addTo(state.heat)
+      }
+    } catch (e) { hotKey = ''; toast(e.message, 4000) }
+  }
+
   async function load() {
     const map = state.map
     if (!map) return
@@ -299,8 +387,9 @@
     state.shapes.clearLayers()
     for (const i of list) {
       if (i.shape) {
-        L.polygon(i.shape, { color: '#8e6cff', weight: 1.5, fillOpacity: i.severity >= 3 ? 0.18 : 0.08, interactive: true }).on('click', (e) => { L.DomEvent.stop(e); showDetail(i) }).addTo(state.shapes)
-        continue
+        L.polygon(i.shape, Object.assign({ interactive: true }, areaStyle(i))).on('click', (e) => { L.DomEvent.stop(e); showDetail(i) }).addTo(state.shapes)
+        // A fire keeps its pin on top of its perimeter, so it can be found zoomed out.
+        if (i.source !== 'wildfires') continue
       }
       const recent = Date.now() - i.at < 30 * 60000
       let m = state.markers.get(i.id)
@@ -325,7 +414,7 @@
     return `<li class="inc k-${i.kind} sev-${i.severity}${fresh ? ' fresh' : ''}"><a href="/i/${encodeURIComponent(i.id)}" data-id="${esc(i.id)}">
 <span class="ico" aria-hidden="true">${KIND_ICON[i.kind] || '📍'}</span>
 <span class="what"><b>${esc(i.title)}</b><span>${esc(i.address || i.area)}</span></span>
-<span class="when"><time>${ago(i.at)}</time><span>${i.shape ? 'area' : miles(d)}</span></span></a></li>`
+<span class="when"><time>${ago(i.at)}</time><span>${i.shape && i.source !== 'wildfires' ? 'area' : miles(d)}</span></span></a></li>`
   }
 
   feedEl.addEventListener('click', (e) => {
@@ -334,7 +423,7 @@
     const i = state.list.find((x) => x.id === a.dataset.id)
     if (!i || !state.map) return
     e.preventDefault()
-    if (i.shape) state.map.fitBounds(L.polygon(i.shape).getBounds(), { padding: [30, 30] })
+    if (i.shape) state.map.fitBounds(L.polygon(i.shape).getBounds(), { padding: [30, 30], maxZoom: 15 })
     else state.map.setView([i.lat, i.lon], Math.max(state.map.getZoom(), 15))
     sheet.classList.remove('open')
     showDetail(i)
@@ -348,8 +437,11 @@
 <h3>${esc(i.title)}</h3>
 <p class="where">${esc(i.address || i.area)}</p>
 ${i.detail ? `<p class="muted" style="margin:.2rem 0 .6rem;font-size:.88rem">${esc(i.detail)}</p>` : ''}
-<div class="row wrap"><a class="btn primary" href="/i/${encodeURIComponent(i.id)}">💬 Details and comments</a><a class="btn" href="/radio?lat=${i.lat}&lon=${i.lon}">📻 Radio</a><button type="button" class="btn ghost" data-share-now>Share</button></div>`
+${fireish(i) ? `<p class="conditions" data-conditions data-lat="${i.lat}" data-lon="${i.lon}" hidden></p>` : ''}
+<div class="row wrap"><a class="btn primary" href="/i/${encodeURIComponent(i.id)}">💬 Details and comments</a>${i.source === 'wildfires' ? `<button type="button" class="btn" data-follow="${esc(i.id)}">🔔 Follow</button>` : ''}<a class="btn" href="/radio?lat=${i.lat}&lon=${i.lon}">📻 Radio</a><button type="button" class="btn ghost" data-share-now>Share</button></div>`
     d.hidden = false
+    fillConditions(d.querySelector('[data-conditions]'))
+    bindFollow(d.querySelector('[data-follow]'))
     d.querySelector('.x').onclick = hideDetail
     d.querySelector('[data-share-now]').onclick = async (e) => {
       const url = location.origin + '/i/' + encodeURIComponent(i.id)
@@ -357,6 +449,7 @@ ${i.detail ? `<p class="muted" style="margin:.2rem 0 .6rem;font-size:.88rem">${e
     }
   }
   function hideDetail() { $('detail').hidden = true }
+  const fireish = (i) => i.kind === 'fire' && i.source !== 'community' ? /fire|brush|vegetation|grass|wildland/i.test(i.title) || i.source === 'wildfires' : i.source === 'evac' || /red flag|fire weather/i.test(i.title)
 
   // A short two-tone chime for a new serious call near you, while the app is open.
   let audio = null
@@ -416,6 +509,8 @@ ${i.detail ? `<p class="muted" style="margin:.2rem 0 .6rem;font-size:.88rem">${e
       if (window.raChat) state.tab === 'chat' ? window.raChat.open() : window.raChat.close()
     })
   }
+
+  if (location.hash === '#alerts') document.querySelector('.tab[data-tab="alerts"]')?.click()
 
   // ---- radio ------------------------------------------------------------------------
   let radioT = null
@@ -486,6 +581,7 @@ ${feeds.length ? `<ol class="feeds">${feeds.map((f) => `<li><a href="${esc(f.url
       try {
         const r = await getJSON('/api/v1/devices/lookup', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: push.sub.endpoint, auth: subJSON().keys.auth }) })
         if (r.device.places.length) { state.places = r.device.places; store.set('places', state.places); renderPlaces() }
+        if (r.device.follows) store.set('follows', r.device.follows)
         setOn(true)
       } catch { setOn(false) }
     }

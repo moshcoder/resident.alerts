@@ -34,6 +34,8 @@ export type Incident = {
   url: string
   /** NWS polygons, as [lat, lon] rings, so the map can draw the warned area. */
   shape?: [number, number][][]
+  /** When a live source stopped listing it (the fire is out, the order lifted). */
+  ended_at?: number
 }
 
 export type Source = {
@@ -46,6 +48,12 @@ export type Source = {
   kinds: Kind[]
   everyMs: number
   homepage: string
+  /**
+   * Each read is the whole current list (active fires, standing warnings,
+   * evacuation zones): what a read leaves out is over, and what it keeps stays
+   * on the map however long ago it started.
+   */
+  live?: boolean
   read: (f: typeof fetch, geo?: Geocoder) => Promise<Incident[]>
 }
 
@@ -239,6 +247,7 @@ export const NWS: Source = {
   km: 2500,
   kinds: ['weather', 'hazard'],
   everyMs: 3 * 60_000,
+  live: true,
   homepage: 'https://www.weather.gov/alerts',
   async read(f) {
     const doc = await getJson(f, 'https://api.weather.gov/alerts/active?status=actual&message_type=alert,update')
@@ -254,11 +263,11 @@ export const NWS: Source = {
       const lon = all.reduce((a, c) => a + c[1], 0) / all.length
       if (!valid(lat, lon)) continue
       const event = String(p.event ?? 'Weather alert')
-      const severity: 1 | 2 | 3 = /warning/i.test(event) && /tornado|flash flood|extreme|hurricane|tsunami|severe thunderstorm|dust storm|snow squall/i.test(event) ? 3 : /warning/i.test(event) ? 2 : 1
+      const severity: 1 | 2 | 3 = /evacuation immediate|shelter in place|civil danger/i.test(event) || (/warning/i.test(event) && /tornado|flash flood|extreme|hurricane|tsunami|severe thunderstorm|dust storm|snow squall|^fire warning/i.test(event)) ? 3 : /warning/i.test(event) ? 2 : 1
       out.push({
         id: `nws:${p.id ?? feat.id}`,
         source: 'nws',
-        kind: /fire weather|red flag/i.test(event) ? 'hazard' : 'weather',
+        kind: /^fire warning/i.test(event) ? 'fire' : /fire weather|red flag|evacuation|shelter in place|civil/i.test(event) ? 'hazard' : 'weather',
         severity,
         title: event,
         detail: String(p.headline ?? '').slice(0, 300),

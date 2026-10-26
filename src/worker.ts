@@ -19,14 +19,31 @@ const ICON: Record<Kind, string> = { police: '🚓', fire: '🔥', medical: '�
 
 export const distanceText = (k: number) => (k < 0.16 ? 'nearby' : `${(k * 0.621371).toFixed(k < 16 ? 1 : 0)} mi`)
 
+/** Distance to the nearest point on an area's outline, on a flat local projection (fine at alert-radius scale). */
+export function edgeKm(lat: number, lon: number, rings: [number, number][][]): number {
+  const kx = 111.32 * Math.cos((lat * Math.PI) / 180)
+  const ky = 110.57
+  let best = Infinity
+  for (const ring of rings) {
+    for (let n = 1; n < ring.length; n++) {
+      const ax = (ring[n - 1]![1] - lon) * kx, ay = (ring[n - 1]![0] - lat) * ky
+      const bx = (ring[n]![1] - lon) * kx, by = (ring[n]![0] - lat) * ky
+      const dx = bx - ax, dy = by - ay
+      const t = dx || dy ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / (dx * dx + dy * dy))) : 0
+      best = Math.min(best, Math.hypot(ax + t * dx, ay + t * dy))
+    }
+  }
+  return best
+}
+
 /** Which of a device's places an incident falls in (closest first), or null. */
 export function matchPlace(d: Pick<Device, 'places' | 'kinds' | 'min_severity'>, i: Incident): { name: string; km: number } | null {
   if (!d.kinds.includes(i.kind) || i.severity < d.min_severity) return null
   let best: { name: string; km: number } | null = null
   for (const p of d.places) {
-    const dist = km(p.lat, p.lon, i.lat, i.lon)
-    const hit = i.shape ? inShape(p.lat, p.lon, i.shape) || dist <= p.km : dist <= p.km
-    if (hit && (!best || dist < best.km)) best = { name: p.name, km: i.shape && inShape(p.lat, p.lon, i.shape) ? 0 : dist }
+    // An area (a fire's perimeter, a warning, a zone) is as close as its nearest edge, and 0 when you are inside it.
+    const dist = i.shape ? (inShape(p.lat, p.lon, i.shape) ? 0 : Math.min(km(p.lat, p.lon, i.lat, i.lon), edgeKm(p.lat, p.lon, i.shape))) : km(p.lat, p.lon, i.lat, i.lon)
+    if (dist <= p.km && (!best || dist < best.km)) best = { name: p.name, km: dist }
   }
   return best
 }
@@ -44,9 +61,12 @@ export function message(i: Incident, place: { name: string; km: number }) {
 
 export type WorkerDeps = { store: Store; sources: Source[]; pusher: Pusher; geo?: Geocoder; fetch?: typeof fetch; log?: (...a: unknown[]) => void }
 
-/** Push fresh incidents to every device they concern. Returns how many pushes went out. */
-export async function fanOut(deps: Pick<WorkerDeps, 'store' | 'pusher'>, fresh: Incident[], now = Date.now()): Promise<number> {
-  const recent = fresh.filter((i) => now - i.at <= FRESH_MS && i.at <= now + 5 * 60_000)
+/**
+ * Push fresh incidents to every device they concern. Returns how many pushes went out.
+ * `anyAge` is for a fire that grew: it started long ago, but its edge only now reaches a place.
+ */
+export async function fanOut(deps: Pick<WorkerDeps, 'store' | 'pusher'>, fresh: Incident[], now = Date.now(), anyAge = false): Promise<number> {
+  const recent = anyAge ? fresh : fresh.filter((i) => now - i.at <= FRESH_MS && i.at <= now + 5 * 60_000)
   if (!recent.length || !deps.pusher.enabled) return 0
   let sent = 0
   for (const d of deps.store.devices()) {
@@ -63,14 +83,52 @@ export async function fanOut(deps: Pick<WorkerDeps, 'store' | 'pusher'>, fresh: 
   return sent
 }
 
+/** What changed on a followed incident, as a push. */
+export function followMessage(i: Incident, ended: boolean) {
+  return {
+    title: ended ? `✅ ${i.title}: ${i.source === 'evac' ? 'lifted' : 'no longer listed as active'}` : `${ICON[i.kind]} Update: ${i.title}`,
+    body: (ended ? [i.address] : [i.detail, i.address]).filter(Boolean).join(' · ').slice(0, 240),
+    url: `/i/${encodeURIComponent(i.id)}`,
+    tag: `${i.id}#follow`,
+    urgent: !ended && i.severity >= 3,
+  }
+}
+
+const digest = (i: Incident, ended: boolean) => (ended ? 'ended' : `${i.severity}|${i.title}|${i.detail}`).replace(/[^\w%|.]+/g, '').slice(0, 120)
+
+/** Tell the devices following an incident that it changed or ended. */
+export async function notifyFollowers(deps: Pick<WorkerDeps, 'store' | 'pusher'>, changed: Incident[], ended: Incident[], now = Date.now()): Promise<number> {
+  if ((!changed.length && !ended.length) || !deps.pusher.enabled) return 0
+  const events = [...changed.map((i) => ({ i, ended: false })), ...ended.map((i) => ({ i, ended: true }))]
+  let sent = 0
+  for (const d of deps.store.devices()) {
+    if (!d.follows.length) continue
+    let budget = PER_DEVICE_HOURLY - deps.store.sentSince(d.id, now - 3600_000)
+    for (const e of events) {
+      if (budget <= 0) break
+      // The same numbers never go out twice, even if a feed flips back and forth.
+      if (!d.follows.includes(e.i.id) || !deps.store.markSent(d.id, `${e.i.id}#${digest(e.i, e.ended)}`)) continue
+      budget -= 1
+      if (await deps.pusher.send(d, followMessage(e.i, e.ended))) sent += 1
+    }
+  }
+  return sent
+}
+
 /** Read one source now: store, then push what is new. */
 export async function readSource(deps: WorkerDeps, s: Source, opts: { first: boolean }) {
   const now = Date.now()
   try {
     const list = await s.read(deps.fetch ?? fetch, deps.geo)
-    const fresh = deps.store.upsertIncidents(list)
+    const { fresh, changed, ended } = deps.store.sync(list, s.live ? { live: s.id } : {})
     deps.store.recordRead(s.id, { ok: true, count: list.length, nextAt: now + s.everyMs })
-    const pushed = opts.first ? 0 : await fanOut(deps, fresh)
+    let pushed = 0
+    if (!opts.first) {
+      pushed += await fanOut(deps, fresh)
+      // A fire that grew may now reach a place it did not before; each place hears about a fire once.
+      pushed += await fanOut(deps, changed.filter((i) => i.kind === 'fire' && i.shape), now, true)
+      pushed += await notifyFollowers(deps, changed, ended, now)
+    }
     if (fresh.length || pushed) deps.log?.(`[${s.id}] ${list.length} read, ${fresh.length} new, ${pushed} pushed`)
     return { ok: true, read: list.length, fresh: fresh.length, pushed }
   } catch (e) {

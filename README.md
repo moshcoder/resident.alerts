@@ -60,7 +60,8 @@ Public feeds agencies publish themselves, read every few minutes on the server
 | Orlando Police active calls | Orlando, FL | XML, geocoded |
 | NWS warnings (with polygons) | US | api.weather.gov |
 | USGS earthquakes M2.5+ | world | GeoJSON |
-| NIFC current wildfires | US | WFIGS ArcGIS |
+| Wildfires: NIFC WFIGS points + perimeters, CAL FIRE incidents | US | WFIGS ArcGIS (perimeters drawn, merged with CAL FIRE by name and distance) |
+| Evacuation zones (orders, warnings, advisories) | US | Genasys Protect public WFS (`zonehavenv2:evacuation_zone`) |
 | California Highway Patrol CAD | all of California | ASP.NET page, all 25 centers, Details postback for lat/lon |
 
 Feeds without coordinates are placed by the US Census geocoder (block
@@ -75,6 +76,19 @@ recordings are not published anywhere in the US; what apps call "911 audio" is
 dispatch radio. OpenMHz (trunked radio clips) blocks datacenter IPs and
 cross-origin browser requests behind a Cloudflare challenge, so it can't be
 embedded.
+
+**Wildfire (Watch Duty-style):** fires, evacuation zones and NWS warnings are
+*live* sources: each read is the agency's whole current list, so an incident
+stays on the map for as long as it is listed (not just inside the hours window)
+and ends when it drops off. A device can follow a fire
+(`POST /api/v1/devices/follow`) and gets a push when its acres, containment or
+status change and when it is out; a fire whose perimeter grows to within an
+alert place's radius alerts that place once. The 🛰 button draws VIIRS
+satellite hotspots (Esri Living Atlas layer fed by NASA FIRMS, no key; FIRMS'
+own API needs one). Fires and evacuation zones show the wind, humidity and
+temperature from the nearest NWS station and the AQI from the nearest EPA
+AirNow monitor (hourly public files). Open-Meteo was skipped: its free tier is
+non-commercial only.
 
 **Map tiles:** OpenStreetMap's standard tiles, darkened with a CSS filter.
 

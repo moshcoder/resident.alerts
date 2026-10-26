@@ -5,11 +5,13 @@
  */
 import type { Radio } from './radio.js'
 import type { Incident, Kind } from './sources.js'
+import type { Conditions } from './wildfire.js'
 
 export const DEFAULT_URL = 'https://resident.alerts.pit.world'
 export type ApiIncident = Incident & { distance_km: number | null }
 export type ApiSource = { id: string; name: string; area: string; kinds: Kind[]; city: boolean; last_ok: number | null; last_error: string | null; last_24h: number }
 export type ApiPost = { id: string; name: string; text: string; media: { id: string; kind: string; url: string }[]; created_at: number }
+export type Fires = { count: number; fires: ApiIncident[]; evacuations: ApiIncident[]; warnings: ApiIncident[] }
 export type Query = { lat?: number; lon?: number; km?: number; hours?: number; kinds?: Kind[]; minSeverity?: 1 | 2 | 3; limit?: number }
 
 export class ApiError extends Error {
@@ -46,6 +48,13 @@ export class AlertsClient {
   }
   incident(id: string) {
     return this.get<Incident & { page: string }>(`/incidents/${encodeURIComponent(id)}`)
+  }
+  /** Active fires (with perimeters), evacuation zones and red flag warnings near a point, or everywhere. */
+  fires(lat?: number, lon?: number, km = 150) {
+    return this.get<Fires>(lat !== undefined && lon !== undefined ? `/fires?lat=${lat}&lon=${lon}&km=${km}` : '/fires')
+  }
+  conditions(lat: number, lon: number) {
+    return this.get<Conditions>(`/conditions?lat=${lat}&lon=${lon}`)
   }
   radio(lat: number, lon: number) {
     return this.get<Radio>(`/radio?lat=${lat}&lon=${lon}`)
