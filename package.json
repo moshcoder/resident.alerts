@@ -1,0 +1,40 @@
+{
+  "name": "@profullstack/residentalerts",
+  "version": "0.1.0",
+  "description": "resident.alerts: live 911 incidents near you on a map, push alerts for the places you care about, and the police and fire radio for your county. Every feature free.",
+  "license": "MIT",
+  "type": "module",
+  "homepage": "https://resident.alerts.pit.world",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moshcoder/resident.alerts.git"
+  },
+  "bin": {
+    "residentalerts": "bin/residentalerts"
+  },
+  "publishConfig": { "access": "public" },
+  "files": ["bin/residentalerts", "src", "public", "README.md", "LICENSE"],
+  "engines": {
+    "bun": ">=1.1"
+  },
+  "scripts": {
+    "start": "bun src/server.ts",
+    "dev": "bun --watch src/server.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.0",
+    "@profullstack/footer": "^0.2.5",
+    "@profullstack/hqtui": "^0.10.3",
+    "hono": "^4.8.0",
+    "web-push": "^3.6.7",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "@types/web-push": "^3.6.4",
+    "leaflet": "1.9.4",
+    "typescript": "^5.9.0"
+  }
+}
