@@ -14,9 +14,21 @@ it, and `X-Premium-Key` sends it to the API.
 - CLI + TUI: `bunx @profullstack/residentalerts near 47.61 -122.33`, `… watch 47.61 -122.33`
 - MCP: `claude mcp add residentalerts -- bunx @profullstack/residentalerts mcp`
 
+## Accounts
+
+Email sign-in with a one-time link (no password): `/signin` -> link (hashed,
+single use, 20 min, spent by a POST so mail scanners cannot) -> 180-day
+session cookie (writes only count with `Sec-Fetch-Site: same-origin`). An
+account holds Premium (bought while signed in, or a key attached on
+`/account`), synced alert places and the community name. Buying Premium and
+posting need an account; the map, radio and one alert place do not.
+`ADMIN_EMAILS` have Premium. Mail goes through Resend (`RESEND_API_KEY`,
+`MAIL_FROM`); `GET /api/v1/admin/emails` (x-admin-key) exports the opt-in list
+as CSV.
+
 ## Community
 
-Pseudonymous residents (`rt_` token + name, no email): comments on every
+Residents (`rt_` token + name, tied to an account): comments on every
 incident, an area chat per ~40 km geohash cell, residents' own reports
 (unverified; push only after two other residents confirm), photos and videos.
 Photos are re-encoded in the browser (EXIF/GPS gone), MP4/MOV `udta`/`meta`

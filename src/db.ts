@@ -25,7 +25,7 @@ export type Device = {
   fails: number
 }
 export type SourceState = { id: string; last_ok: number; last_error: string; last_count: number; next_at: number }
-export type Payment = { ref: string; amount_cents: number; chain: string; status: string; created_at: number; license_hash: string | null }
+export type Payment = { ref: string; amount_cents: number; chain: string; status: string; created_at: number; license_hash: string | null; user_id: string | null }
 
 export const MAX_PLACES = 25
 export const MAX_KM = 80
@@ -103,6 +103,8 @@ export class Store {
     const cols = (this.db.query('PRAGMA table_info(payments)').all() as Row[]).map((c) => c.name)
     if (!cols.includes('license_hash')) this.db.exec('ALTER TABLE payments ADD COLUMN license_hash TEXT')
     if (!cols.includes('paid_at')) this.db.exec('ALTER TABLE payments ADD COLUMN paid_at INTEGER')
+    // 0.4.0: Premium bought while signed in belongs to the account.
+    if (!cols.includes('user_id')) this.db.exec('ALTER TABLE payments ADD COLUMN user_id TEXT')
     this.db.exec('CREATE INDEX IF NOT EXISTS payments_license ON payments(license_hash)')
   }
 
@@ -244,12 +246,12 @@ export class Store {
 
   // ---- Premium ------------------------------------------------------------
 
-  recordPayment(p: { ref: string; amount_cents: number; chain: string; raw: unknown; license_hash?: string }) {
-    this.db.query('INSERT OR IGNORE INTO payments (ref, amount_cents, chain, created_at, raw, license_hash) VALUES (?, ?, ?, ?, ?, ?)').run(p.ref, p.amount_cents, p.chain, this.now(), JSON.stringify(p.raw ?? {}), p.license_hash ?? null)
+  recordPayment(p: { ref: string; amount_cents: number; chain: string; raw: unknown; license_hash?: string; user_id?: string }) {
+    this.db.query('INSERT OR IGNORE INTO payments (ref, amount_cents, chain, created_at, raw, license_hash, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)').run(p.ref, p.amount_cents, p.chain, this.now(), JSON.stringify(p.raw ?? {}), p.license_hash ?? null, p.user_id ?? null)
   }
 
   payment(ref: string): Payment | null {
-    return (this.db.query('SELECT ref, amount_cents, chain, status, created_at, license_hash FROM payments WHERE ref = ?').get(ref) as Payment | null) ?? null
+    return (this.db.query('SELECT ref, amount_cents, chain, status, created_at, license_hash, user_id FROM payments WHERE ref = ?').get(ref) as Payment | null) ?? null
   }
 
   /** Record the webhook's status; a settled one stamps paid_at (once, and it never un-pays). */

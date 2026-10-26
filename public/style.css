@@ -162,6 +162,14 @@ main.page { max-width: 780px; margin: 0 auto; padding: 0 16px 3rem; }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
 .dot.ok { background: var(--ok); } .dot.bad { background: var(--fail); }
 .ticks { padding-left: 1.2rem; } .ticks li { margin: .3rem 0; }
+.signin { display: flex; flex-direction: column; gap: .8rem; max-width: 420px; }
+.signin input[type=email], .card input[type=text] { display: block; width: 100%; font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: .55rem .7rem; margin-top: .25rem; }
+.card input[type=text] { width: auto; flex: 1; min-width: 12rem; margin: 0; }
+label.check { display: flex; gap: .5rem; align-items: flex-start; color: var(--text); }
+.card { border: 1px solid var(--line); border-radius: 12px; padding: .2rem 1rem .8rem; margin: 1rem 0; background: var(--panel); }
+.card h2 { margin-top: .8rem; }
+.danger { margin-top: 2rem; color: var(--muted); }
+.top nav a.acct { color: var(--text); }
 .tipform { display: flex; flex-direction: column; gap: .9rem; align-items: flex-start; }
 .tipform fieldset { border: 0; padding: 0; margin: 0; display: flex; gap: .5rem; flex-wrap: wrap; }
 .tipform legend { color: var(--muted); font-size: .9rem; margin-bottom: .4rem; }

@@ -61,7 +61,7 @@ export function isPremium(cfg: PremiumConfig, store: Store, key: unknown): boole
 export const limitsFor = (cfg: PremiumConfig, store: Store, key: unknown): Limits => (isPremium(cfg, store, key) ? PREMIUM : FREE)
 
 /** Start a Premium checkout; returns CoinPay's page and the key the buyer will get. */
-export async function startPremium(cfg: PremiumConfig, store: Store, args: { chain: string; successUrl: (key: string) => string; cancelUrl: string }, fetcher: typeof fetch = fetch): Promise<{ checkoutUrl: string; ref: string; key: string }> {
+export async function startPremium(cfg: PremiumConfig, store: Store, args: { chain: string; successUrl: (key: string) => string; cancelUrl: string; userId?: string }, fetcher: typeof fetch = fetch): Promise<{ checkoutUrl: string; ref: string; key: string }> {
   if (!cfg.coinpay) throw new Error('payments are not set up on this server yet')
   if (!cfg.chains.includes(args.chain)) throw new Error('pick a currency from the list')
   const key = newKey()
@@ -75,7 +75,7 @@ export async function startPremium(cfg: PremiumConfig, store: Store, args: { cha
       blockchain: args.chain,
       payment_method: 'crypto',
       description: 'resident.alerts Premium (lifetime)',
-      metadata: { product: 'premium-lifetime' },
+      metadata: { product: 'premium-lifetime', ...(args.userId ? { account: args.userId } : {}) },
       success_url: args.successUrl(key),
       cancel_url: args.cancelUrl,
     }),
@@ -88,7 +88,7 @@ export async function startPremium(cfg: PremiumConfig, store: Store, args: { cha
   const ref = payment?.id ?? payment?.payment_id
   if (!ref) throw new Error('CoinPay returned no payment reference')
   // Written before the buyer leaves: a webhook can beat the redirect.
-  store.recordPayment({ ref: String(ref), amount_cents: cfg.cents, chain: args.chain, raw: body, license_hash: hashKey(key) })
+  store.recordPayment({ ref: String(ref), amount_cents: cfg.cents, chain: args.chain, raw: body, license_hash: hashKey(key), ...(args.userId ? { user_id: args.userId } : {}) })
   return { checkoutUrl: `${cfg.coinpay.baseUrl}/pay/${ref}`, ref: String(ref), key }
 }
 
