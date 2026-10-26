@@ -66,6 +66,10 @@ export class Accounts {
   }
   /** Spend a link: the account (made on first sign-in), or null if it is used up or old. */
   takeLink(token: string): User | null {
+    return this.spendLink(token)?.user ?? null
+  }
+  /** takeLink, also saying whether this sign-in made the account (an invite only counts for a new one). */
+  spendLink(token: string): { user: User; created: boolean } | null {
     const h = sha(token)
     const r = this.db.query('SELECT email, news, created_at, used_at, attach_user FROM login_links WHERE hash = ?').get(h) as Row | null
     if (!r || r.used_at || this.now() - r.created_at > LINK_MS) return null
@@ -76,13 +80,14 @@ export class Accounts {
       const owner = this.byEmail(r.email)
       if (owner) {
         this.mergeInto(attach.id, owner.id)
-        return owner.banned ? null : this.user(owner.id)
+        return owner.banned ? null : { user: this.user(owner.id)!, created: false }
       }
       this.db.query('UPDATE users SET email = ?, news = ?, unverified_email = NULL WHERE id = ?').run(r.email, r.news ? 1 : 0, attach.id)
-      return this.user(attach.id)
+      return { user: this.user(attach.id)!, created: false }
     }
+    const created = !this.byEmail(r.email)
     const u = this.ensureUser(r.email, Boolean(r.news))
-    return u.banned ? null : u
+    return u.banned ? null : { user: u, created }
   }
   ensureUser(email: string, news = true): User {
     const e = email.toLowerCase()

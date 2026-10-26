@@ -16,13 +16,14 @@ import { Hono, type Context } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { Accounts, createMailer, EMAIL, hasEmail, mailConfig, type Mailer, type User } from './accounts.js'
 import { CoinPayOAuth, oauthConfig } from './coinpay-oauth.js'
+import { CodeError, Codes, INVITE_CODE, REF_CODE } from './codes.js'
 import { SOURCES } from './cities.js'
 import { chpSource } from './chp.js'
 import { Community } from './community.js'
 import { mountCommunity } from './community-routes.js'
 import { cleanKinds, cleanPlaces, MAX_PLACES, Store } from './db.js'
 import { Geocoder } from './geocode.js'
-import { aboutPage, accountPage, apiPage, confirmSigninPage, coveragePage, homePage, incidentPage, messagePage, premiumKeyPage, premiumPage, radioPage, signinPage, type Ctx } from './html.js'
+import { aboutPage, accountPage, apiPage, confirmSigninPage, coveragePage, homePage, incidentPage, invitedPage, invitesPage, messagePage, premiumKeyPage, premiumPage, radioPage, signinPage, type Ctx } from './html.js'
 import { startPitFooterRefresh } from './pit-footer.js'
 import { createPusher, pushConfig, type Pusher } from './push.js'
 import { RadioFinder } from './radio.js'
@@ -67,6 +68,10 @@ export type Deps = {
 }
 
 const SESSION = 'ra_session'
+/** An invite link someone opened, until they make an account (7 days). */
+const INVITE = 'ra_invite'
+/** The first affiliate link (?ref=) a visitor arrived through (30 days). */
+const REF = 'ra_ref'
 const safeNext = (n: unknown) => (typeof n === 'string' && /^\/[A-Za-z0-9/_?=&%.:#-]*$/.test(n) && !n.startsWith('//') ? n : '/account')
 
 class Limiter {
@@ -158,6 +163,18 @@ export function createApp(deps: Deps) {
   /** A Premium key from the API (header) or a form/body field. */
   const keyOf = (c: Context) => c.req.header('x-premium-key') ?? (c.req.header('authorization') ?? '').replace(/^Bearer\s+/i, '')
   const PRICE = price(deps.premium.cents)
+  /** Credit codes and invites: they hang off accounts, so only with accounts on. */
+  const codes = deps.accounts ? new Codes(store, deps.accounts, deps.premium) : null
+  const cookieOpts = (c: Context, maxAge: number) => ({ httpOnly: true, secure: deps.secureCookies ?? https(c), sameSite: 'Lax' as const, path: '/', maxAge })
+  /** A new account: spend the invite it came through and credit the affiliate link it arrived by. */
+  const welcomeNew = async (c: Context, u: User, created: boolean) => {
+    if (!codes) return
+    const invite = getCookie(c, INVITE)
+    if (invite && created) await codes.acceptInvite(invite, u).catch(() => null)
+    if (invite) deleteCookie(c, INVITE, { path: '/' })
+    const ref = getCookie(c, REF)
+    if (ref && created) await codes.affiliates.attribute(ref, u.id).catch(() => null)
+  }
 
   app.use('*', async (c, next) => {
     // Forms only from our own pages: a cross-site POST is refused before it reaches a handler.
@@ -167,6 +184,12 @@ export function createApp(deps: Deps) {
     await next()
     // A route that set its own (uploaded media sets a sandbox CSP) keeps it.
     for (const [k, v] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(k)) c.header(k, v)
+  })
+  // Anyone arriving with ?ref=<affiliate code> is remembered for when they make an account (first touch wins).
+  app.use('*', async (c, next) => {
+    const ref = c.req.query('ref')
+    if (codes && ref && REF_CODE.test(ref) && !getCookie(c, REF)) setCookie(c, REF, ref, cookieOpts(c, 30 * 86_400))
+    await next()
   })
 
   app.get('/health', (c) => c.json({ ok: true, version: VERSION, push: pusher.enabled, devices: store.countDevices(), sources: store.sourceStates().filter((s) => s.last_ok > Date.now() - 30 * 60_000).length }))
@@ -225,6 +248,7 @@ export function createApp(deps: Deps) {
 
   // ---- signing in (one-time email links) ---------------------------------------------
   const signinLimit = new Limiter(10, 60 * 60_000)
+  const redeemLimit = new Limiter(10, 10 * 60_000)
   if (deps.accounts) {
     const acc = deps.accounts
     app.get('/signin', (c) => {
@@ -251,8 +275,10 @@ export function createApp(deps: Deps) {
     })
     app.post('/auth/:token', async (c) => {
       const f = (await c.req.parseBody()) as Record<string, string>
-      const u = acc.takeLink(c.req.param('token'))
-      if (!u) return page(c, confirmSigninPage(ctxOf(c), { token: '', next: '/account', ok: false }), 400)
+      const got = acc.spendLink(c.req.param('token'))
+      if (!got) return page(c, confirmSigninPage(ctxOf(c), { token: '', next: '/account', ok: false }), 400)
+      const u = got.user
+      await welcomeNew(c, u, got.created)
       setCookie(c, SESSION, acc.newSession(u.id), { httpOnly: true, secure: deps.secureCookies ?? https(c), sameSite: 'Lax', path: '/', maxAge: 180 * 86_400 })
       return c.redirect(safeNext(f.next))
     })
@@ -273,6 +299,7 @@ export function createApp(deps: Deps) {
         const r = acc.signInWithCoinPay(out.profile, out.linkUser)
         if ('error' in r) return fail(r.error)
         if (out.linkUser) return c.redirect('/account?connected=1')
+        await welcomeNew(c, r.user, r.created)
         setCookie(c, SESSION, acc.newSession(r.user.id), { httpOnly: true, secure: deps.secureCookies ?? https(c), sameSite: 'Lax', path: '/', maxAge: 180 * 86_400 })
         return c.redirect(r.created ? '/account?welcome=1' : safeNext(out.next))
       })
@@ -284,9 +311,11 @@ export function createApp(deps: Deps) {
     })
     const accountView = (c: Context, u: User, extra: { flash?: string; error?: string } = {}, status = 200) =>
       page(c, accountPage(ctxOf(c), { email: displayEmail(u), verified: hasEmail(u), suggestEmail: u.unverified_email ?? '', coinpay: acc.identities(u.id).some((i) => i.provider === 'coinpay'), coinpayOn: Boolean(deps.oauth), premium: accountPremium(u), since: acc.premiumSince(u), news: Boolean(u.news), places: u.places.length, price: PRICE, ...extra }), status)
-    app.get('/account', (c) => {
+    app.get('/account', async (c) => {
       const u = userOf(c)
       if (!u) return c.redirect('/signin?next=/account')
+      // Premium credits granted from outside a redemption (the redeem-credits CLI) switch on here.
+      if (codes) await codes.applyPremium(u)
       const q = c.req.query()
       const flash = q.paid ? 'Payment sent. Premium switches on as soon as CoinPay confirms it (usually a minute or two), and we email you a receipt.' : q.connected ? 'CoinPay is connected: you can sign in with it from now on.' : q.welcome && !hasEmail(u) ? 'Signed in with CoinPay. Add your email below to get receipts and keep your account if you ever lose CoinPay access.' : ''
       return accountView(c, u, flash ? { flash } : {})
@@ -299,6 +328,14 @@ export function createApp(deps: Deps) {
         case 'news':
           acc.setNews(u.id, f.news === '1')
           return accountView(c, acc.user(u.id)!, { flash: f.news === '1' ? 'You will get occasional updates.' : 'No more updates. Sign-in links and receipts still arrive.' })
+        case 'redeem':
+          if (!codes) return c.redirect('/account')
+          if (!redeemLimit.allow(`redeem:${u.id}`)) return accountView(c, u, { error: 'Too many tries. Wait a few minutes.' }, 429)
+          try {
+            return accountView(c, u, { flash: await codes.redeem(u, f.code) })
+          } catch (e) {
+            return accountView(c, u, { error: e instanceof Error ? e.message : String(e) }, e instanceof CodeError ? 400 : 500)
+          }
         case 'key':
           return acc.attachKey(deps.premium, u.id, String(f.key ?? ''))
             ? accountView(c, u, { flash: 'Key attached: Premium is on your account.' })
@@ -320,6 +357,34 @@ export function createApp(deps: Deps) {
           return page(c, messagePage(ctxOf(c), { title: 'Account deleted', message: 'Your email and saved places are gone. Alerts on your devices keep working until you turn them off.' }))
       }
       return c.redirect('/account')
+    })
+
+    // ---- invites and affiliate links ------------------------------------------------
+    // /i/ is an incident page, so an invite lands on /invite/<code>.
+    app.get('/invite/:code', (c) => {
+      const code = c.req.param('code')
+      if (!INVITE_CODE.test(code)) return page(c, messagePage(ctxOf(c), { title: 'Not an invite', message: 'That invite link is not right.' }), 404)
+      if (!userOf(c)) setCookie(c, INVITE, code, cookieOpts(c, 7 * 86_400))
+      return page(c, invitedPage(ctxOf(c)))
+    })
+    const invitesView = async (c: Context, u: User, extra: { link?: string; error?: string } = {}, status = 200) =>
+      page(c, invitesPage(ctxOf(c), { ...(await codes!.invitesView(u, RELAY_ORIGIN)), ...extra }), status)
+    app.get('/invites', async (c) => {
+      const u = userOf(c)
+      if (!u) return c.redirect('/signin?next=/invites')
+      return invitesView(c, u)
+    })
+    app.post('/invites', async (c) => {
+      const u = userOf(c)
+      if (!u) return c.redirect('/signin?next=/invites')
+      const f = (await c.req.parseBody()) as Record<string, string>
+      try {
+        const invite = await codes!.affiliates.createInvite(u.id, String(f.note ?? '').slice(0, 80))
+        return invitesView(c, u, { link: `${RELAY_ORIGIN}/invite/${invite.code}` })
+      } catch (e) {
+        const m = e instanceof Error ? e.message : String(e)
+        return invitesView(c, u, { error: m === 'no invites left' ? 'You have used all your invites.' : m }, 400)
+      }
     })
   }
 
@@ -527,6 +592,37 @@ export function createApp(deps: Deps) {
     const b = ((await c.req.json().catch(() => ({}))) ?? {}) as { key?: string }
     const attached = deps.accounts.attachKey(deps.premium, u.id, String(b.key ?? ''))
     return c.json({ attached, premium: accountPremium(u) }, attached ? 200 : 400)
+  })
+  /** Redeem a credit code for the signed-in account. */
+  api.post('/redeem', async (c) => {
+    const u = userOf(c)
+    if (!u || !codes) return c.json({ error: 'sign in first' }, 401)
+    if (!redeemLimit.allow(`redeem:${u.id}`)) return c.json({ error: 'too many tries; wait a few minutes' }, 429)
+    const b = ((await c.req.json().catch(() => ({}))) ?? {}) as { code?: string }
+    try {
+      const message = await codes.redeem(u, b.code)
+      return c.json({ ok: true, message, premium: accountPremium(u) })
+    } catch (e) {
+      return c.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, e instanceof CodeError ? 400 : 500)
+    }
+  })
+  api.get('/invites', async (c) => {
+    const u = userOf(c)
+    if (!u || !codes) return c.json({ error: 'sign in first' }, 401)
+    const v = await codes.invitesView(u, RELAY_ORIGIN)
+    return c.json({ quota: v.quota, invites: v.invites, affiliate_link: v.affiliate })
+  })
+  api.post('/invites', async (c) => {
+    const u = userOf(c)
+    if (!u || !codes) return c.json({ error: 'sign in first' }, 401)
+    const b = ((await c.req.json().catch(() => ({}))) ?? {}) as { note?: string }
+    try {
+      const invite = await codes.affiliates.createInvite(u.id, String(b.note ?? '').slice(0, 80))
+      return c.json({ link: `${RELAY_ORIGIN}/invite/${invite.code}`, code: invite.code, expires_at: invite.expiresAt ? new Date(invite.expiresAt).toISOString() : null, left: (await codes.affiliates.quota(u.id)).left }, 201)
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e)
+      return c.json({ error: m === 'no invites left' ? 'You have used all your invites.' : m }, 400)
+    }
   })
   api.put('/account/places', async (c) => {
     const u = userOf(c)
