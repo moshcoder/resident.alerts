@@ -1,0 +1,21 @@
+{
+  "name": "resident.alerts",
+  "short_name": "Alerts",
+  "description": "Live 911 incidents near you, push alerts for your places, and police radio. Free.",
+  "start_url": "/?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b0d10",
+  "theme_color": "#0b0d10",
+  "categories": ["news", "utilities", "navigation"],
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ],
+  "shortcuts": [
+    { "name": "Radio", "url": "/radio", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Coverage", "url": "/coverage", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] }
+  ]
+}
