@@ -5,6 +5,7 @@ import { Store } from '../src/db.js'
 import type { Pusher } from '../src/push.js'
 import { normCounty, parseCountyPage, parseStatePage, RadioFinder } from '../src/radio.js'
 import { createApp } from '../src/server.js'
+import { hashKey, newKey } from '../src/premium.js'
 import { parseArgs, queryFrom } from '../src/cli.js'
 import { absorb, initialState, onKey } from '../src/tui.js'
 import { inc } from './store.test.js'
@@ -19,12 +20,13 @@ const fakeFetch = (async (url: string | URL) => {
   return new Response('nope', { status: 404 })
 }) as unknown as typeof fetch
 
-function setup(push = true) {
+const COMP = newKey()
+function setup(push = true, fetcher?: typeof fetch) {
   const store = new Store()
   const sent: string[] = []
   const pusher: Pusher = push ? { enabled: true, publicKey: 'BPUB', send: async (d) => (sent.push(d.id), true) } : { enabled: false, publicKey: '', send: async () => false }
-  const tips = { coinpay: { baseUrl: 'https://coinpay.test', apiKey: 'k', businessId: 'b', webhookSecret: 'whsec' }, chains: ['BTC'] }
-  const app = createApp({ store, sources: SOURCES, pusher, radio: new RadioFinder(fakeFetch), tips })
+  const premium = { coinpay: { baseUrl: 'https://coinpay.test', apiKey: 'k', businessId: 'b', webhookSecret: 'whsec' }, chains: ['BTC'], cents: 499, comp: new Set([hashKey(COMP)]) }
+  const app = createApp({ store, sources: SOURCES, pusher, radio: new RadioFinder(fakeFetch), premium, ...(fetcher ? { fetch: fetcher } : {}) })
   return { app, store, sent }
 }
 const json = (body: unknown, method = 'POST') => ({ method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
@@ -52,7 +54,7 @@ describe('pages', () => {
   })
   test('coverage, about, api, radio, tip, health', async () => {
     const { app } = setup()
-    for (const p of ['/coverage', '/about', '/api', '/radio', '/tip', '/health', '/sitemap.xml', '/robots.txt', '/llms.txt', '/manifest.webmanifest', '/sw.js', '/vendor/leaflet.js']) expect((await app.request(p)).status).toBe(200)
+    for (const p of ['/coverage', '/about', '/api', '/radio', '/premium', '/health', '/sitemap.xml', '/robots.txt', '/llms.txt', '/manifest.webmanifest', '/sw.js', '/vendor/leaflet.js']) expect((await app.request(p)).status).toBe(200)
     const radio = await (await app.request('/radio?lat=48.2&lon=-122.5')).text()
     expect(radio).toContain('Island County Public Safety')
   })
@@ -97,10 +99,53 @@ describe('api', () => {
   })
 })
 
-describe('tips', () => {
+const sign = (body: string) => {
+  const t = Math.floor(Date.now() / 1000)
+  return `t=${t},v1=${createHmac('sha256', 'whsec').update(`${t}.${body}`).digest('hex')}`
+}
+
+describe('premium', () => {
+  test('checkout, then the key works only once CoinPay settles it', async () => {
+    let sentBody: any = null
+    const coinpay = (async (_u: string, init: any) => ((sentBody = JSON.parse(init.body)), Response.json({ success: true, payment: { id: 'pay_9' } }))) as unknown as typeof fetch
+    const { app, store } = setup(true, coinpay)
+    const r = await app.request('/premium', { method: 'POST', body: new URLSearchParams({ chain: 'BTC' }) })
+    expect(r.status).toBe(302)
+    expect(r.headers.get('location')).toBe('https://coinpay.test/pay/pay_9')
+    expect(sentBody.amount).toBe(4.99)
+    const key = String(sentBody.success_url).split('/premium/k/')[1]!
+    const check = async () => ((await (await app.request('/api/v1/premium/check', json({ key }))).json()) as any).premium
+    expect(await check()).toBe(false)
+    expect(await (await app.request(`/premium/k/${key}`)).text()).toContain('Waiting for the payment')
+    const body = JSON.stringify({ data: { payment_id: 'pay_9', status: 'confirmed' } })
+    expect((await app.request('/hooks/coinpay', { method: 'POST', body, headers: { 'x-coinpay-signature': sign(body) } })).status).toBe(200)
+    expect(await check()).toBe(true)
+    expect(await (await app.request(`/premium/k/${key}`)).text()).toContain('data-premium-key')
+    // A later "failed" webhook never takes it back.
+    const later = JSON.stringify({ data: { payment_id: 'pay_9', status: 'failed' } })
+    await app.request('/hooks/coinpay', { method: 'POST', body: later, headers: { 'x-coinpay-signature': sign(later) } })
+    expect(store.licensePaid(hashKey(key))).toBe(true)
+    expect((await app.request('/premium/k/ra_notarealkeynotarealkey')).status).toBe(404)
+  })
+  test('free devices get one place within 3 miles; Premium gets more', async () => {
+    const { app } = setup()
+    const two = [{ name: 'Home', lat: 47.6, lon: -122.3, km: 2 }, { name: 'Work', lat: 47.62, lon: -122.33, km: 2 }]
+    const free = await app.request('/api/v1/devices', json({ subscription, places: two }))
+    expect(free.status).toBe(402)
+    expect(((await free.json()) as any).premium_required).toBe(true)
+    expect((await app.request('/api/v1/devices', json({ subscription, places: [{ ...two[0], km: 20 }] }))).status).toBe(402)
+    expect((await app.request('/api/v1/devices', json({ subscription, places: two, premium_key: COMP }))).status).toBe(200)
+  })
+  test('history past a day needs a key', async () => {
+    const { app, store } = setup()
+    store.upsertIncidents([inc({ id: 'old', at: Date.now() - 3 * 86_400_000 })])
+    const ids = async (h: Record<string, string> = {}) => ((await (await app.request('/api/v1/incidents?hours=168', { headers: h })).json()) as any).incidents.map((i: any) => i.id)
+    expect(await ids()).toEqual([])
+    expect(await ids({ 'x-premium-key': COMP })).toEqual(['old'])
+  })
   test('only a signed webhook for a payment we started counts', async () => {
     const { app, store } = setup()
-    store.recordPayment({ ref: 'pay_1', amount_cents: 1000, chain: 'BTC', raw: {} })
+    store.recordPayment({ ref: 'pay_1', amount_cents: 499, chain: 'BTC', raw: {} })
     const body = JSON.stringify({ id: 'evt_1', data: { payment_id: 'pay_1', status: 'confirmed' } })
     const t = Math.floor(Date.now() / 1000)
     const sig = `t=${t},v1=${createHmac('sha256', 'whsec').update(`${t}.${body}`).digest('hex')}`

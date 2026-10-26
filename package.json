@@ -1,7 +1,7 @@
 {
   "name": "@profullstack/residentalerts",
-  "version": "0.1.0",
-  "description": "resident.alerts: live 911 incidents near you on a map, push alerts for the places you care about, and the police and fire radio for your county. Every feature free.",
+  "version": "0.2.0",
+  "description": "resident.alerts: live 911 incidents near you on a map, push alerts for the places you care about, and the police and fire radio for your county. Free, with Premium for $4.99 once.",
   "license": "MIT",
   "type": "module",
   "homepage": "https://resident.alerts.pit.world",

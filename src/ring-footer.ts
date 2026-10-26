@@ -21,7 +21,7 @@ const OPTIONS: FooterOptions = {
     { label: 'Coverage', href: '/coverage' },
     { label: 'API', href: '/api' },
     { label: 'Source', href: 'https://github.com/moshcoder/resident.alerts' },
-    { label: 'Chip in', href: '/tip' },
+    { label: 'Premium', href: '/premium' },
   ],
 }
 

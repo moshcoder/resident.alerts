@@ -58,6 +58,10 @@ h2 { font-size: 1.15rem; margin: 1.8em 0 .5em; }
 select, input[type=text], input[type=number] { font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: .3rem .5rem; }
 label { font-size: .9rem; color: var(--muted); }
 .hint { color: var(--muted); font-size: .88rem; margin: .8rem 0; }
+.plan { font-size: .88rem; border: 1px solid var(--line); border-radius: 10px; padding: .55rem .75rem; background: var(--panel); }
+.havekey { margin: .8rem 0; font-size: .88rem; color: var(--muted); }
+.havekey input { flex: 1; min-width: 12rem; margin-top: .4rem; }
+.bigkey { font-size: 1.05rem; padding: .4rem .6rem; user-select: all; }
 .status { min-height: 1.4em; font-size: .9rem; color: var(--muted); }
 
 /* incident list */
