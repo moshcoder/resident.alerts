@@ -6,6 +6,7 @@
  */
 import { createHash } from 'node:crypto'
 import { blockAddress, streetName, type Geocoder, type Place } from './geocode.js'
+import { EVACUATIONS, WILDFIRES } from './wildfire.js'
 import { getJson, NWS, num, SEATTLE_FIRE, SF_POLICE, socrata, toIncident, USGS, valid, type Incident, type Kind, type Row, type Source } from './sources.js'
 
 const UA = 'resident.alerts/0.1 (+https://resident.alerts.pit.world; alerts@pit.world)'
@@ -140,45 +141,6 @@ export const MONROE_NY: Source = {
   },
 }
 
-/** Current wildfires from the National Interagency Fire Center (WFIGS), discovered in the last two weeks. */
-export const WILDFIRES: Source = {
-  id: 'wildfires',
-  name: 'NIFC current wildfires',
-  area: 'United States',
-  center: [39.5, -98.35],
-  km: 2500,
-  kinds: ['fire'],
-  everyMs: 10 * 60_000,
-  homepage: 'https://data-nifc.opendata.arcgis.com/',
-  async read(f) {
-    const since = Date.now() - 14 * 24 * HOUR
-    const where = encodeURIComponent(`FireDiscoveryDateTime >= TIMESTAMP '${new Date(since).toISOString().slice(0, 19).replace('T', ' ')}'`)
-    const fields = 'UniqueFireIdentifier,IncidentName,FireDiscoveryDateTime,IncidentSize,PercentContained,POOCounty,POOState,IncidentTypeCategory'
-    const doc = await getJson(f, `https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Incident_Locations_Current/FeatureServer/0/query?where=${where}&outFields=${fields}&outSR=4326&f=geojson&resultRecordCount=2000`)
-    return (doc?.features ?? []).flatMap((feat: any): Incident[] => {
-      const p = feat.properties ?? {}
-      const [lon, lat] = feat.geometry?.coordinates ?? []
-      if (!valid(num(lat), num(lon)) || p.IncidentTypeCategory === 'RX') return []
-      const acres = Number(p.IncidentSize ?? 0)
-      const contained = p.PercentContained === null || p.PercentContained === undefined ? '' : `${Math.round(p.PercentContained)}% contained`
-      return [{
-        id: `wildfires:${p.UniqueFireIdentifier}`,
-        source: 'wildfires',
-        kind: 'fire',
-        severity: acres >= 1000 ? 3 : acres >= 50 ? 2 : 1,
-        title: `${String(p.IncidentName ?? 'Wildfire').trim()} fire`,
-        detail: [acres ? `${acres.toLocaleString('en-US')} acres` : '', contained].filter(Boolean).join(' · '),
-        address: [p.POOCounty ? `${p.POOCounty} County` : '', String(p.POOState ?? '').replace(/^US-/, '')].filter(Boolean).join(', '),
-        area: 'NIFC',
-        lat: num(lat),
-        lon: num(lon),
-        at: Number(p.FireDiscoveryDateTime) || Date.now(),
-        url: 'https://www.nifc.gov/fire-information/nfn',
-      }]
-    })
-  },
-}
-
 // ---- addresses only (geocoded) ------------------------------------------------
 
 const SAN_DIEGO: Place = { city: 'San Diego', state: 'CA', bbox: [32.53, -117.31, 33.12, -116.9] }
@@ -281,6 +243,7 @@ export const SOURCES: Source[] = [
   NWS,
   USGS,
   WILDFIRES,
+  EVACUATIONS,
 ]
 
 export const sourceById = (id: string) => SOURCES.find((s) => s.id === id)

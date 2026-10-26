@@ -210,3 +210,12 @@ dialog.report input[type=text], dialog.report textarea, .composer textarea { dis
 .comments { margin-top: 2rem; }
 .reportbox { border: 1px solid var(--line); border-radius: 12px; padding: .6rem .9rem; background: var(--panel); }
 .pane .pmedia img, .pane .pmedia video { max-height: 160px; max-width: 220px; }
+
+/* wildfire */
+.conditions { margin: .2rem 0 .6rem; font-size: .86rem; line-height: 1.5; }
+.conditions .windarrow { display: inline-block; color: #64d2ff; }
+.conditions .fw { color: #ff9f0a; }
+.aqi { padding: 0 .35rem; border-radius: 6px; font-weight: 600; }
+.aqi-1 { background: #1f7a3a; } .aqi-2 { background: #8a7a00; } .aqi-3 { background: #b35900; } .aqi-4 { background: #a3141a; } .aqi-5 { background: #6b1f7a; }
+.ended { padding: .5rem .75rem; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); }
+.fab.on#hotspots { color: inherit; background: color-mix(in srgb, #ff6a00 35%, var(--panel)); border-color: #ff6a00; }

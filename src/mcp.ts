@@ -39,6 +39,17 @@ export function createMcpServer(client = new AlertsClient()): McpServer {
     { hours: z.number().min(0.1).max(72).optional(), limit: z.number().int().min(1).max(500).optional() },
     wrap(async (a: any) => (await client.incidents({ hours: a.hours ?? 2, minSeverity: 3, limit: a.limit ?? 50 })).map(slim)),
   )
+  server.tool(
+    'fires_near',
+    'Wildfires the way Watch Duty shows them: active fires near a point (acres, containment, perimeter as rings of [lat, lon]), evacuation orders/warnings by zone, and red flag warnings. Omit lat/lon for the whole US.',
+    { lat: z.number().min(-90).max(90).optional(), lon: z.number().min(-180).max(180).optional(), km: z.number().min(1).max(500).optional(), perimeters: z.boolean().optional() },
+    wrap(async (a: any) => {
+      const r = await client.fires(a.lat, a.lon, a.km ?? 150)
+      const keep = (i: any) => ({ ...slim(i), ...(a.perimeters && i.shape ? { shape: i.shape } : {}) })
+      return { fires: r.fires.map(keep), evacuations: r.evacuations.map(slim), warnings: r.warnings.map(slim) }
+    }),
+  )
+  server.tool('fire_conditions', 'Wind (speed, gusts, direction it comes from), humidity and temperature from the nearest NWS station, and AQI from the nearest EPA AirNow monitor, at a point. fire_weather is true when it is dry and windy.', { lat: z.number(), lon: z.number() }, wrap(({ lat, lon }: any) => client.conditions(lat, lon)))
   server.tool('get_incident', 'One incident by id, with its source and a shareable page link.', { id: z.string().min(3).max(200) }, wrap(({ id }: any) => client.incident(id)))
   server.tool('radio_near', 'Police, fire and EMS scanner feeds for the US county at a point (Broadcastify links, live status, listeners).', { lat: z.number(), lon: z.number() }, wrap(({ lat, lon }: any) => client.radio(lat, lon)))
   server.tool('incident_comments', 'What residents said about an incident (text plus links to their photos and videos).', { id: z.string().min(3).max(200) }, wrap(({ id }: any) => client.comments(id)))

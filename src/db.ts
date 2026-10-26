@@ -20,6 +20,8 @@ export type Device = {
   places: Place[]
   kinds: Kind[]
   min_severity: 1 | 2 | 3
+  /** Incidents this device follows (a fire, mostly): it hears about every change to them. */
+  follows: string[]
   created_at: number
   last_push_at: number
   fails: number
@@ -31,6 +33,7 @@ export type Payment = { ref: string; amount_cents: number; chain: string; status
 export const scrubRaw = (v: unknown) => JSON.stringify(v ?? {}).replace(/ra_[A-Za-z0-9_-]{20,40}/g, 'ra_…')
 
 export const MAX_PLACES = 25
+export const MAX_FOLLOWS = 25
 export const MAX_KM = 80
 
 const deviceId = (endpoint: string) => createHash('sha256').update(endpoint).digest('hex').slice(0, 24)
@@ -58,11 +61,11 @@ export const cleanKinds = (input: unknown): Kind[] => {
 type Row = Record<string, any>
 const toIncident = (r: Row): Incident => ({
   id: r.id, source: r.source, kind: r.kind, severity: r.severity, title: r.title, detail: r.detail, address: r.address, area: r.area,
-  lat: r.lat, lon: r.lon, at: r.at, url: r.url, ...(r.shape ? { shape: JSON.parse(r.shape) } : {}),
+  lat: r.lat, lon: r.lon, at: r.at, url: r.url, ...(r.shape ? { shape: JSON.parse(r.shape) } : {}), ...(r.ended_at ? { ended_at: r.ended_at } : {}),
 })
 const toDevice = (r: Row): Device => ({
   id: r.id, endpoint: r.endpoint, p256dh: r.p256dh, auth: r.auth, places: JSON.parse(r.places), kinds: JSON.parse(r.kinds),
-  min_severity: r.min_severity, created_at: r.created_at, last_push_at: r.last_push_at, fails: r.fails,
+  min_severity: r.min_severity, follows: JSON.parse(r.follows ?? '[]'), created_at: r.created_at, last_push_at: r.last_push_at, fails: r.fails,
 })
 
 export class Store {
@@ -109,25 +112,56 @@ export class Store {
     // 0.4.0: Premium bought while signed in belongs to the account.
     if (!cols.includes('user_id')) this.db.exec('ALTER TABLE payments ADD COLUMN user_id TEXT')
     this.db.exec('CREATE INDEX IF NOT EXISTS payments_license ON payments(license_hash)')
+    // 0.6.0: live sources (fires, evacuation zones, standing warnings) stay on the map until they end; devices follow fires.
+    const icols = (this.db.query('PRAGMA table_info(incidents)').all() as Row[]).map((c) => c.name)
+    if (!icols.includes('live')) this.db.exec('ALTER TABLE incidents ADD COLUMN live INTEGER NOT NULL DEFAULT 0')
+    if (!icols.includes('ended_at')) this.db.exec('ALTER TABLE incidents ADD COLUMN ended_at INTEGER')
+    this.db.exec('CREATE INDEX IF NOT EXISTS incidents_live ON incidents(source) WHERE live = 1 AND ended_at IS NULL')
+    const dcols = (this.db.query('PRAGMA table_info(devices)').all() as Row[]).map((c) => c.name)
+    if (!dcols.includes('follows')) this.db.exec("ALTER TABLE devices ADD COLUMN follows TEXT NOT NULL DEFAULT '[]'")
   }
 
   // ---- incidents ------------------------------------------------------------
 
   /** Insert or refresh a batch; returns the ones we had never seen. */
   upsertIncidents(list: Incident[]): Incident[] {
+    return this.sync(list).fresh
+  }
+
+  /**
+   * Insert or refresh a batch. `fresh` were never seen; `changed` were, and now
+   * say something different (a fire grew, or got more contained). With `live`,
+   * the batch is the source's whole current list: whatever of that source it
+   * leaves out has `ended`.
+   */
+  sync(list: Incident[], opts: { live?: string } = {}): { fresh: Incident[]; changed: Incident[]; ended: Incident[] } {
     const now = this.now()
-    const exists = this.db.query('SELECT 1 FROM incidents WHERE id = ?')
+    const before = this.db.query('SELECT title, detail, severity, ended_at FROM incidents WHERE id = ?')
     const insert = this.db.query(
-      'INSERT INTO incidents (id, source, kind, severity, title, detail, address, area, lat, lon, at, url, shape, seen_at, updated_at) VALUES ($id, $source, $kind, $severity, $title, $detail, $address, $area, $lat, $lon, $at, $url, $shape, $now, $now) ON CONFLICT(id) DO UPDATE SET kind = $kind, severity = $severity, title = $title, detail = $detail, address = $address, lat = $lat, lon = $lon, url = $url, shape = $shape, updated_at = $now',
+      'INSERT INTO incidents (id, source, kind, severity, title, detail, address, area, lat, lon, at, url, shape, seen_at, updated_at, live) VALUES ($id, $source, $kind, $severity, $title, $detail, $address, $area, $lat, $lon, $at, $url, $shape, $now, $now, $live) ON CONFLICT(id) DO UPDATE SET kind = $kind, severity = $severity, title = $title, detail = $detail, address = $address, lat = $lat, lon = $lon, url = $url, shape = $shape, updated_at = $now, live = $live, ended_at = NULL',
     )
     const fresh: Incident[] = []
+    const changed: Incident[] = []
+    let ended: Incident[] = []
     this.db.transaction(() => {
       for (const i of list) {
-        if (!exists.get(i.id)) fresh.push(i)
-        insert.run({ $id: i.id, $source: i.source, $kind: i.kind, $severity: i.severity, $title: i.title, $detail: i.detail, $address: i.address, $area: i.area, $lat: i.lat, $lon: i.lon, $at: i.at, $url: i.url, $shape: i.shape ? JSON.stringify(i.shape) : null, $now: now })
+        const b = before.get(i.id) as Row | null
+        if (!b) fresh.push(i)
+        else if (b.ended_at === null && (b.title !== i.title || b.detail !== i.detail || b.severity !== i.severity)) changed.push(i)
+        insert.run({ $id: i.id, $source: i.source, $kind: i.kind, $severity: i.severity, $title: i.title, $detail: i.detail, $address: i.address, $area: i.area, $lat: i.lat, $lon: i.lon, $at: i.at, $url: i.url, $shape: i.shape ? JSON.stringify(i.shape) : null, $now: now, $live: opts.live ? 1 : 0 })
+      }
+      if (opts.live) {
+        const open = (this.db.query('SELECT * FROM incidents WHERE source = ? AND live = 1 AND ended_at IS NULL').all(opts.live) as Row[]).map(toIncident)
+        const keep = new Set(list.map((i) => i.id))
+        // An empty answer from a feed that had plenty is an outage, not every fire going out at once.
+        if (list.length || open.length <= 20) {
+          ended = open.filter((i) => !keep.has(i.id))
+          const end = this.db.query('UPDATE incidents SET ended_at = ? WHERE id = ?')
+          for (const i of ended) end.run(now, i.id)
+        }
       }
     })()
-    return fresh
+    return { fresh, changed, ended }
   }
 
   incident(id: string): Incident | null {
@@ -142,7 +176,8 @@ export class Store {
     const kinds = o.kinds?.length ? o.kinds : KINDS
     const marks = kinds.map(() => '?').join(',')
     const args: (string | number)[] = [since, ...kinds, o.minSeverity ?? 1]
-    let sql = `SELECT * FROM incidents WHERE at >= ? AND kind IN (${marks}) AND severity >= ?`
+    // Ongoing incidents from live sources (an active fire, an evacuation order) show however long ago they began.
+    let sql = `SELECT * FROM incidents WHERE (at >= ? OR live = 1) AND ended_at IS NULL AND kind IN (${marks}) AND severity >= ?`
     if (o.source) {
       sql += ' AND source = ?'
       args.push(o.source)
@@ -177,7 +212,7 @@ export class Store {
   prune(days = 30): number {
     const cut = this.now() - days * 86_400_000
     this.db.query('DELETE FROM sent WHERE at < ?').run(cut)
-    return this.db.query('DELETE FROM incidents WHERE at < ?').run(cut).changes
+    return this.db.query('DELETE FROM incidents WHERE at < ? AND NOT (live = 1 AND ended_at IS NULL)').run(cut).changes
   }
 
   // ---- devices ------------------------------------------------------------
@@ -210,6 +245,19 @@ export class Store {
 
   devices(): Device[] {
     return (this.db.query('SELECT * FROM devices').all() as Row[]).map(toDevice)
+  }
+
+  /** Follow or unfollow an incident; returns the device's follows. */
+  follow(deviceId: string, incidentId: string, on: boolean): string[] | string {
+    const r = this.db.query('SELECT follows FROM devices WHERE id = ?').get(deviceId) as Row | null
+    if (!r) return 'no such device'
+    const list: string[] = JSON.parse(r.follows ?? '[]').filter((id: string) => id !== incidentId)
+    if (on) {
+      if (list.length >= MAX_FOLLOWS) return `you can follow up to ${MAX_FOLLOWS} at once`
+      list.push(incidentId)
+    }
+    this.db.query('UPDATE devices SET follows = ? WHERE id = ?').run(JSON.stringify(list), deviceId)
+    return list
   }
 
   countDevices(): number {

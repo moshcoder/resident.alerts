@@ -5,6 +5,7 @@
  *   residentalerts serious [--hours 1] [--json]       serious calls everywhere we cover
  *   residentalerts show <id> [--json]
  *   residentalerts radio <lat> <lon> [--json]
+ *   residentalerts fires [<lat> <lon>] [--km 150] [--json]   active fires, evacuation zones, red flag warnings
  *   residentalerts sources [--json]
  *   residentalerts comments <id> [--json]             what neighbors said about an incident
  *   residentalerts chat <lat> <lon> [--json]          the area chat there
@@ -22,6 +23,7 @@ const HELP = `residentalerts ${VERSION}: live 911 incidents near you (https://re
   residentalerts serious [--hours 1] [--json]
   residentalerts show <id> [--json]
   residentalerts radio <lat> <lon> [--json]
+  residentalerts fires [<lat> <lon>] [--km 150] [--json]
   residentalerts sources [--json]
   residentalerts comments <id> [--json]
   residentalerts chat <lat> <lon> [--json]
@@ -108,6 +110,21 @@ export async function main(argv = process.argv.slice(2), out = (s: string) => co
         out(`${r.county}, ${r.stateCode}`)
         for (const f of r.feeds) out(`  ${f.online ? '●' : '○'} ${f.name} (${f.listeners} listening)  ${f.url}`)
         if (!r.feeds.length) out('  no scanner feeds listed')
+        return 0
+      }
+      case 'fires': {
+        const q = queryFrom(pos, flags)
+        const r = await client.fires(q.lat, q.lon, q.km ?? 150)
+        if (flags.json) return json(r), 0
+        const sect = (h: string, list: typeof r.fires) => list.length && out(`${h}\n${list.map((i) => `${incidentLine(i)}${i.detail ? `  ·  ${i.detail}` : ''}`).join('\n')}`)
+        sect('Fires', r.fires)
+        sect('Evacuations', r.evacuations)
+        sect('Warnings', r.warnings)
+        if (q.lat !== undefined) {
+          const c = await client.conditions(q.lat, q.lon!).catch(() => null)
+          if (c) out(`Here: wind ${c.wind_mph ?? '?'} mph${c.wind_from ? ` from ${c.wind_from}` : ''}${c.gust_mph ? `, gusts ${c.gust_mph}` : ''} · ${c.humidity ?? '?'}% humidity${c.aqi !== null ? ` · AQI ${c.aqi} ${c.aqi_label}` : ''}${c.fire_weather ? ' · FIRE WEATHER' : ''}`)
+        }
+        if (!r.count) out('No active fires or evacuations there.')
         return 0
       }
       case 'sources': {

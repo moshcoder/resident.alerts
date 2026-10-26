@@ -118,6 +118,7 @@ export function homePage(ctx: Ctx, o: { latest: Incident[]; push: boolean; vapid
   <div id="map" class="map" role="region" aria-label="Map of incidents"></div>
   <div class="maptools">
     <button type="button" id="locate" class="fab" title="Center on me" aria-label="Center on me">◎</button>
+    <button type="button" id="hotspots" class="fab" title="Satellite fire hotspots" aria-label="Show satellite fire hotspots" aria-pressed="false">🛰</button>
     <button type="button" id="report-open" class="fab report" title="Report what you see" aria-label="Report an incident">＋</button>
   </div>
   <div class="crosshair" id="crosshair" hidden aria-hidden="true">✛</div>
@@ -204,6 +205,9 @@ export function homePage(ctx: Ctx, o: { latest: Incident[]; push: boolean; vapid
   })
 }
 
+/** Fires, fire weather and evacuation zones get the wind, humidity and air-quality line. */
+const fireish = (i: Incident) => (i.kind === 'fire' && i.source !== 'community' ? i.source === 'wildfires' || /fire|brush|vegetation|grass|wildland/i.test(i.title) : i.source === 'evac' || /red flag|fire weather/i.test(i.title))
+
 export function incidentPage(ctx: Ctx, o: { i: Incident; nearby: (Incident & { distance_km: number | null })[]; source: Source | undefined }): string {
   const { i } = o
   const when = new Date(i.at)
@@ -212,15 +216,18 @@ export function incidentPage(ctx: Ctx, o: { i: Incident; nearby: (Incident & { d
   <h1>${esc(i.title)}</h1>
   <p class="where">${esc(i.address)}</p>
   <p class="meta">Reported <time datetime="${iso(i.at)}" data-local>${esc(when.toUTCString().replace(' GMT', ' UTC'))}</time> (${ago(i.at)})${i.detail ? ` · ${esc(i.detail)}` : ''}</p>
-  <div id="mini" class="mini" data-lat="${i.lat}" data-lon="${i.lon}" data-kind="${i.kind}" data-shape="${i.shape ? esc(JSON.stringify(i.shape)) : ''}"></div>
+  ${i.ended_at ? `<p class="ended">${i.source === 'evac' ? 'Lifted' : 'No longer listed as active'} since <time datetime="${iso(i.ended_at)}" data-local>${esc(new Date(i.ended_at).toUTCString())}</time>.</p>` : ''}
+  ${fireish(i) && !i.ended_at ? `<p class="conditions" data-conditions data-lat="${i.lat}" data-lon="${i.lon}" hidden></p>` : ''}
+  <div id="mini" class="mini" data-lat="${i.lat}" data-lon="${i.lon}" data-kind="${i.kind}" data-source="${esc(i.source)}" data-severity="${i.severity}" data-title="${esc(i.title)}" data-shape="${i.shape ? esc(JSON.stringify(i.shape)) : ''}"></div>
   <p class="row wrap">
-    <a class="btn primary" href="/?lat=${i.lat}&amp;lon=${i.lon}&amp;z=15">Open on the map</a>
+    <a class="btn primary" href="/?lat=${i.lat}&amp;lon=${i.lon}&amp;z=${i.shape ? 11 : 15}">Open on the map</a>
+    ${i.source === 'wildfires' && !i.ended_at ? `<button type="button" class="btn" data-follow="${esc(i.id)}">🔔 Follow</button>` : ''}
     <a class="btn" href="/radio?lat=${i.lat}&amp;lon=${i.lon}">📻 Police and fire radio here</a>
     <button type="button" class="btn ghost" data-share="${esc(SITE)}/i/${esc(encodeURIComponent(i.id))}" data-title="${esc(i.title)}">Share</button>
   </p>
   ${i.source === 'community'
     ? `<div class="reportbox" id="report-box" data-report="${esc(i.id)}"><p class="muted">A resident's report, not confirmed by any agency.</p></div>`
-    : `<p class="source">Source: <a href="${esc(i.url || o.source?.homepage || '#')}" rel="noopener" target="_blank">${esc(o.source?.name ?? i.source)}</a>. This is what the agency published; it is not confirmed by us, and the location of a dispatch is often a block or an intersection, not an exact address.</p>`}
+    : `<p class="source">Source: <a href="${esc(i.url || o.source?.homepage || '#')}" rel="noopener" target="_blank">${esc(o.source?.name ?? i.source)}</a>. ${i.source === 'wildfires' || i.source === 'evac' ? 'This is what the agencies published. In an emergency, follow your county\'s and fire department\'s instructions; evacuation orders come from them, not from us.' : 'This is what the agency published; it is not confirmed by us, and the location of a dispatch is often a block or an intersection, not an exact address.'}</p>`}
 </article>
 <section class="comments" id="comments" data-incident="${esc(i.id)}">
   <h2>Neighbors</h2>
@@ -282,6 +289,8 @@ export function aboutPage(ctx: Ctx, price: string): string {
 <h2>Free</h2>
 <ul class="ticks">
   <li>Live map and list of 911 incidents, weather warnings, earthquakes and wildfires, last 24 hours</li>
+  <li>Wildfires the way Watch Duty shows them: every active fire with its mapped perimeter, acres and containment (NIFC and CAL FIRE), evacuation orders and warnings by zone, satellite heat detections, red flag warnings, and the wind, humidity and air quality at each fire</li>
+  <li>Follow a fire: a push each time it grows, gets more contained, or is out; and an alert when a fire's edge comes within your place's radius</li>
   <li>Push alerts for one place within 3 miles, each kind of call on or off, serious-only mode</li>
   <li>Police and fire radio for your county</li>
   <li>Comments on every incident, a neighborhood chat, and your own reports with photos and videos (location data stripped before they go public)</li>
@@ -320,6 +329,12 @@ GET ${SITE}/api/v1/incidents?kinds=police,fire&amp;min_severity=3&amp;hours=1
 GET ${SITE}/api/v1/incidents/&lt;id&gt;
 GET ${SITE}/api/v1/radio?lat=29.76&amp;lon=-95.37
 GET ${SITE}/api/v1/sources</code></pre>
+<h2>Wildfire</h2>
+<pre><code>GET ${SITE}/api/v1/fires?lat=37.23&amp;lon=-121.97&amp;km=150     # active fires (with perimeters), evacuation zones, red flag warnings
+GET ${SITE}/api/v1/hotspots?s=36.5&amp;w=-122.5&amp;n=38&amp;e=-121    # VIIRS satellite heat detections, last 48 hours
+GET ${SITE}/api/v1/conditions?lat=37.23&amp;lon=-121.97         # wind, humidity, temperature (NWS) and AQI (AirNow)
+POST ${SITE}/api/v1/devices/follow {"endpoint","auth","id","follow":true}   # pushes when a fire grows, is contained, or is out</code></pre>
+<p>Fires, evacuation zones and standing warnings are <i>live</i>: they show for as long as the agency lists them, whatever <code>hours</code> says, and leave when it stops. A shaped incident carries <code>shape</code>, rings of [lat, lon].</p>
 <p>Kinds: police, fire, medical, traffic, weather, quake, hazard, other. Severity 1 routine, 2 notable, 3 serious. Times are epoch milliseconds. Without a key, <code>hours</code> stops at 24; send <code>X-Premium-Key: ra_…</code> for up to 30 days.</p>
 <h2>Command line and terminal UI</h2>
 <pre><code>bunx @profullstack/residentalerts near 47.61 -122.33 --km 3

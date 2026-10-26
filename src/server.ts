@@ -31,6 +31,7 @@ import { RING_PLACEHOLDER, ringBar, startRingRefresh, visitorOnMoshpit } from '.
 import { KINDS, type Kind, type Source } from './sources.js'
 import { FREE, hashKey, isPremium, KEY_SHAPE, limitsFor, PREMIUM, premiumConfig, price, readWebhook, SETTLED, startPremium, verifyWebhook, type PremiumConfig } from './premium.js'
 import { VERSION } from './version.js'
+import { ConditionsFinder, Hotspots } from './wildfire.js'
 import { startWorker } from './worker.js'
 
 export { VERSION }
@@ -59,6 +60,8 @@ export type Deps = {
   accounts?: Accounts
   mail?: Mailer
   oauth?: CoinPayOAuth
+  hotspots?: Hotspots
+  conditions?: ConditionsFinder
   secureCookies?: boolean
   fetch?: typeof fetch
 }
@@ -91,6 +94,17 @@ const kindsIn = (v: unknown): Kind[] | undefined => {
   return list.length ? list : undefined
 }
 
+/** At most `max` points per ring, evenly sampled, the ring kept closed. */
+export function thin(rings: [number, number][][], max: number): [number, number][][] {
+  return rings.map((r) => {
+    if (r.length <= max) return r
+    const step = r.length / (max - 1)
+    const out = Array.from({ length: max - 1 }, (_, n) => r[Math.floor(n * step)]!)
+    out.push(r[0]!)
+    return out
+  })
+}
+
 /** Query string -> a near() call. Shared by the API and the pages. */
 export function incidentQuery(q: Record<string, string | undefined>, maxHours = 24 * 30) {
   const lat = numIn(q.lat, -90, 90)
@@ -114,6 +128,7 @@ export function createApp(deps: Deps) {
   const radioLimit = new Limiter(20, 60_000)
   const deviceLimit = new Limiter(30, 60 * 60_000)
   const testLimit = new Limiter(5, 60 * 60_000)
+  const layerLimit = new Limiter(60, 60_000)
 
   const direct = (c: Context) => visitorOnMoshpit(SELF, c.req.header('host'), c.req.header('x-moshpit-name'))
   const https = (c: Context) => (c.req.header('x-forwarded-proto') ?? 'https') === 'https'
@@ -163,7 +178,7 @@ export function createApp(deps: Deps) {
     const urls = [...paths.map((p) => `${RELAY_ORIGIN}${p}`), ...recent.map((i) => `${RELAY_ORIGIN}/i/${encodeURIComponent(i.id)}`)]
     return c.body(`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls.map((u) => `<url><loc>${u.replace(/&/g, '&amp;')}</loc></url>`).join('')}</urlset>`, 200, { 'content-type': 'application/xml' })
   })
-  app.get('/llms.txt', (c) => c.text(`# resident.alerts\n\nLive 911 incidents (police, fire, medical, traffic) from US city open-data feeds, plus NWS warnings, USGS earthquakes and NIFC wildfires. Free, no key.\n\n- GET ${RELAY_ORIGIN}/api/v1/incidents?lat=&lon=&km=&hours=&kinds=&min_severity=\n- GET ${RELAY_ORIGIN}/api/v1/incidents/{id}\n- GET ${RELAY_ORIGIN}/api/v1/radio?lat=&lon=\n- GET ${RELAY_ORIGIN}/api/v1/sources\n- MCP: bunx @profullstack/residentalerts mcp\n`))
+  app.get('/llms.txt', (c) => c.text(`# resident.alerts\n\nLive 911 incidents (police, fire, medical, traffic) from US city open-data feeds, plus NWS warnings, USGS earthquakes, wildfires with perimeters (NIFC, CAL FIRE) and evacuation zones. Free, no key.\n\n- GET ${RELAY_ORIGIN}/api/v1/incidents?lat=&lon=&km=&hours=&kinds=&min_severity=\n- GET ${RELAY_ORIGIN}/api/v1/fires?lat=&lon=&km=\n- GET ${RELAY_ORIGIN}/api/v1/hotspots?s=&w=&n=&e=\n- GET ${RELAY_ORIGIN}/api/v1/conditions?lat=&lon=\n- GET ${RELAY_ORIGIN}/api/v1/incidents/{id}\n- GET ${RELAY_ORIGIN}/api/v1/radio?lat=&lon=\n- GET ${RELAY_ORIGIN}/api/v1/sources\n- MCP: bunx @profullstack/residentalerts mcp\n`))
 
   const TYPES: Record<string, string> = { css: 'text/css; charset=utf-8', js: 'text/javascript; charset=utf-8', svg: 'image/svg+xml', png: 'image/png', webmanifest: 'application/manifest+json', html: 'text/html; charset=utf-8', crt: 'application/x-x509-ca-cert' }
   app.get('/:file{(style\\.css|app\\.js|community\\.js|sw\\.js|favicon\\.svg|icon-192\\.png|icon-512\\.png|manifest\\.webmanifest|offline\\.html|moshpit-root-ca\\.crt)}', async (c) => {
@@ -374,8 +389,41 @@ export function createApp(deps: Deps) {
   api.get('/incidents', (c) => {
     // History past a day is Premium; without a key the window quietly stops at 24 hours.
     const q = incidentQuery(c.req.query(), limitsOf(c, keyOf(c)).hours)
-    const list = store.near(q)
+    // Zoomed out, an area's outline needs far fewer points than a street-level view: keep the payload phone-sized.
+    const budget = q.km > 150 ? 60 : q.km > 40 ? 250 : 0
+    const list = budget ? store.near(q).map((i) => (i.shape ? { ...i, shape: thin(i.shape, budget) } : i)) : store.near(q)
     return c.json({ count: list.length, incidents: list }, 200, { 'cache-control': 'public, max-age=20' })
+  })
+  // Watch Duty-style fire view: active fires and evacuation zones, however long ago they started.
+  api.get('/fires', (c) => {
+    const q = incidentQuery({ km: '150', limit: '1000', ...c.req.query(), hours: '24' }, 24)
+    const list = store.near({ ...q, kinds: ['fire', 'hazard'], sinceMs: Date.now() }).filter((i) => i.source === 'wildfires' || i.source === 'evac' || /red flag|fire/i.test(i.title))
+    return c.json({ count: list.length, fires: list.filter((i) => i.kind === 'fire'), evacuations: list.filter((i) => i.source === 'evac'), warnings: list.filter((i) => i.source === 'nws') }, 200, { 'cache-control': 'public, max-age=30' })
+  })
+  api.get('/hotspots', async (c) => {
+    if (!deps.hotspots) return c.json({ error: 'hotspots are off on this server' }, 503)
+    const s = numIn(c.req.query('s'), -90, 90), w = numIn(c.req.query('w'), -180, 180), n = numIn(c.req.query('n'), -90, 90), e = numIn(c.req.query('e'), -180, 180)
+    if (s === undefined || w === undefined || n === undefined || e === undefined || s >= n || w >= e) return c.json({ error: 'send the box as s, w, n, e (degrees)' }, 400)
+    if (!layerLimit.allow(`layer:${ip(c)}`)) return c.json({ error: 'slow down: 60 a minute' }, 429)
+    try {
+      const list = await deps.hotspots.inBox([s, w, n, e])
+      return c.json({ count: list.length, hotspots: list, source: 'VIIRS (NASA FIRMS via Esri Living Atlas), last 48 hours' }, 200, { 'cache-control': 'public, max-age=300' })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return c.json({ error: /zoom in/.test(msg) ? msg : 'could not reach the hotspot layer just now' }, /zoom in/.test(msg) ? 400 : 502)
+    }
+  })
+  api.get('/conditions', async (c) => {
+    if (!deps.conditions) return c.json({ error: 'conditions are off on this server' }, 503)
+    const lat = numIn(c.req.query('lat'), -90, 90)
+    const lon = numIn(c.req.query('lon'), -180, 180)
+    if (lat === undefined || lon === undefined) return c.json({ error: 'lat and lon are required' }, 400)
+    if (!layerLimit.allow(`layer:${ip(c)}`)) return c.json({ error: 'slow down: 60 a minute' }, 429)
+    try {
+      return c.json(await deps.conditions.near(lat, lon), 200, { 'cache-control': 'public, max-age=600' })
+    } catch {
+      return c.json({ error: 'could not reach the weather service just now' }, 502)
+    }
   })
   api.get('/incidents/:id', (c) => {
     const i = store.incident(c.req.param('id'))
@@ -412,9 +460,9 @@ export function createApp(deps: Deps) {
     return c.json({ premium, limits: premium ? PREMIUM : FREE, price: PRICE })
   })
 
-  type DeviceBody = { subscription?: { endpoint?: string; keys?: { p256dh?: string; auth?: string } }; endpoint?: string; auth?: string; places?: unknown; kinds?: unknown; min_severity?: unknown; premium_key?: string }
+  type DeviceBody = { subscription?: { endpoint?: string; keys?: { p256dh?: string; auth?: string } }; endpoint?: string; auth?: string; places?: unknown; kinds?: unknown; min_severity?: unknown; premium_key?: string; id?: string; follow?: boolean }
   const body = async (c: Context) => ((await c.req.json().catch(() => ({}))) ?? {}) as DeviceBody
-  const deviceView = (d: ReturnType<Store['device']>) => d && { places: d.places, kinds: d.kinds, min_severity: d.min_severity, created_at: d.created_at, last_push_at: d.last_push_at || null }
+  const deviceView = (d: ReturnType<Store['device']>) => d && { places: d.places, kinds: d.kinds, min_severity: d.min_severity, follows: d.follows, created_at: d.created_at, last_push_at: d.last_push_at || null }
 
   /** Turn alerts on, or change places/kinds: the subscription itself is the credential. */
   api.post('/devices', async (c) => {
@@ -448,6 +496,16 @@ export function createApp(deps: Deps) {
     if (!testLimit.allow(`test:${d.id}`)) return c.json({ error: 'five tests an hour' }, 429)
     const ok = await pusher.send(d, { title: '🔔 resident.alerts is on', body: `Watching ${d.places.length} place${d.places.length === 1 ? '' : 's'}. This is what an alert looks like.`, url: '/', tag: 'test' })
     return c.json({ ok })
+  })
+  /** Follow a fire (or any incident): every change to it, and its end, comes to this device. */
+  api.post('/devices/follow', async (c) => {
+    const b = await body(c)
+    const d = b.endpoint && b.auth ? store.deviceFor(b.endpoint, b.auth) : null
+    if (!d) return c.json({ error: 'turn on alerts on this device first' }, 404)
+    const id = String(b.id ?? '')
+    if (b.follow !== false && !store.incident(id)) return c.json({ error: 'no such incident' }, 404)
+    const follows = store.follow(d.id, id, b.follow !== false)
+    return typeof follows === 'string' ? c.json({ error: follows }, 400) : c.json({ ok: true, follows })
   })
   api.delete('/devices', async (c) => {
     const b = await body(c)
@@ -510,7 +568,7 @@ export async function serve(opts: { port?: number } = {}) {
   const mail = createMailer(mailConfig(env))
   const oc = oauthConfig(env)
   const oauth = oc ? new CoinPayOAuth(store.db, oc) : undefined
-  const app = createApp({ store, sources, pusher, radio, premium: premiumConfig(env), community, accounts, mail, ...(oauth ? { oauth } : {}) })
+  const app = createApp({ store, sources, pusher, radio, premium: premiumConfig(env), community, accounts, mail, hotspots: new Hotspots(), conditions: new ConditionsFinder(), ...(oauth ? { oauth } : {}) })
   // The relay hostname, so pit.world serves the Moshpit footer template.
   startPitFooterRefresh('resident.alerts.pit.world')
   startRingFooterRefresh()
