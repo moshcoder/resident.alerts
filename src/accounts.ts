@@ -40,6 +40,7 @@ export class Accounts {
       CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS user_licenses (user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, license_hash TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user_id, license_hash));
       CREATE TABLE IF NOT EXISTS user_identities (provider TEXT NOT NULL, sub TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, email TEXT, created_at INTEGER NOT NULL, PRIMARY KEY (provider, sub));
+      CREATE TABLE IF NOT EXISTS api_keys (hash TEXT PRIMARY KEY, user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE, created_at INTEGER NOT NULL, last_used_at INTEGER);
     `)
     // 0.5.0: CoinPay sign-in (unverified email kept aside) and "add your email" links.
     const ucols = (db.query('PRAGMA table_info(users)').all() as Row[]).map((c) => c.name)
@@ -117,6 +118,41 @@ export class Accounts {
     if (sid) this.db.query('DELETE FROM sessions WHERE hash = ?').run(sha(sid))
   }
 
+  // ---- API keys (webhooks from the CLI, MCP and your own code) ---------------------
+
+  /** A new API key for the account (`rak_…`, shown once, stored as a hash); the old one stops working. */
+  newApiKey(userId: string): string {
+    const key = `rak_${rand(24)}`
+    this.db.transaction(() => {
+      this.db.query('DELETE FROM api_keys WHERE user_id = ?').run(userId)
+      this.db.query('INSERT INTO api_keys (hash, user_id, created_at) VALUES (?, ?, ?)').run(sha(key), userId, this.now())
+    })()
+    return key
+  }
+  apiKeySince(userId: string): number | null {
+    return ((this.db.query('SELECT created_at FROM api_keys WHERE user_id = ?').get(userId) as Row | null)?.created_at as number) ?? null
+  }
+  byApiKey(key: string): User | null {
+    if (!/^rak_[A-Za-z0-9_-]{20,64}$/.test(key)) return null
+    const r = this.db.query('SELECT u.* FROM api_keys k JOIN users u ON u.id = k.user_id WHERE k.hash = ?').get(sha(key)) as Row | null
+    if (!r || r.banned) return null
+    this.db.query('UPDATE api_keys SET last_used_at = ? WHERE hash = ?').run(this.now(), sha(key))
+    return toUser(r)
+  }
+  /** The account a paid (or comp) Premium key belongs to: attached to it, or bought while signed in. */
+  byPremiumKey(cfg: PremiumConfig, key: string): User | null {
+    if (!KEY_SHAPE.test(key.trim())) return null
+    const h = hashKey(key)
+    if (!cfg.comp.has(h) && !this.db.query('SELECT 1 FROM payments WHERE license_hash = ? AND paid_at IS NOT NULL').get(h)) return null
+    const r = (this.db.query('SELECT user_id FROM user_licenses WHERE license_hash = ? ORDER BY at LIMIT 1').get(h) ??
+      this.db.query('SELECT user_id FROM payments WHERE license_hash = ? AND user_id IS NOT NULL LIMIT 1').get(h)) as Row | null
+    const u = r ? this.user(r.user_id) : null
+    return u && !u.banned ? u : null
+  }
+  private hasTable(name: string): boolean {
+    return Boolean(this.db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name))
+  }
+
   // ---- what an account holds ------------------------------------------------------
 
   setNews(id: string, on: boolean) {
@@ -158,6 +194,11 @@ export class Accounts {
     this.db.transaction(() => {
       this.db.query('DELETE FROM sessions WHERE user_id = ?').run(id)
       this.db.query('DELETE FROM user_licenses WHERE user_id = ?').run(id)
+      this.db.query('DELETE FROM api_keys WHERE user_id = ?').run(id)
+      // Its webhooks (and their delivery log) go with it.
+      if (this.hasTable('webhook_endpoints')) this.db.query('DELETE FROM webhook_endpoints WHERE owner = ?').run(id)
+      if (this.hasTable('webhook_deliveries')) this.db.query('DELETE FROM webhook_deliveries WHERE owner = ?').run(id)
+      if (this.hasTable('account_sent')) this.db.query('DELETE FROM account_sent WHERE user_id = ?').run(id)
       // Payments stay (they are the business's records); they just stop pointing at a person.
       this.db.query('UPDATE payments SET user_id = NULL WHERE user_id = ?').run(id)
       this.db.query('DELETE FROM users WHERE id = ?').run(id)
@@ -215,6 +256,11 @@ export class Accounts {
         const toHas = this.db.query('SELECT 1 FROM residents WHERE user_id = ?').get(toId)
         this.db.query(toHas ? 'UPDATE residents SET user_id = NULL WHERE user_id = ?' : 'UPDATE residents SET user_id = ? WHERE user_id = ?').run(...((toHas ? [fromId] : [toId, fromId]) as [string]))
       }
+      // Webhooks keep working: they now belong to the account it merged into. Its API key goes.
+      if (this.hasTable('webhook_endpoints')) this.db.query('UPDATE webhook_endpoints SET owner = ? WHERE owner = ?').run(toId, fromId)
+      if (this.hasTable('webhook_deliveries')) this.db.query('UPDATE webhook_deliveries SET owner = ? WHERE owner = ?').run(toId, fromId)
+      if (this.hasTable('account_sent')) this.db.query('DELETE FROM account_sent WHERE user_id = ?').run(fromId)
+      this.db.query('DELETE FROM api_keys WHERE user_id = ?').run(fromId)
       this.db.query('DELETE FROM sessions WHERE user_id = ?').run(fromId)
       this.db.query('DELETE FROM user_licenses WHERE user_id = ?').run(fromId)
       this.db.query('DELETE FROM users WHERE id = ?').run(fromId)

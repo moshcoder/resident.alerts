@@ -42,6 +42,8 @@ export class Codes {
     readonly store: Store,
     readonly accounts: Accounts,
     readonly premium: PremiumConfig,
+    /** Premium just switched on for this account (its webhooks hear `premium.activated`). */
+    readonly onPremium?: (u: User) => void,
   ) {
     this.credits = new Credits(sqliteStore(store.db as never))
     this.affiliates = new Affiliates(affiliateStore(store.db as never), { defaultQuota: INVITES_PER_PERSON })
@@ -60,6 +62,7 @@ export class Codes {
     const ref = `credit:${u.id}:${Date.now()}`
     this.store.recordPayment({ ref, amount_cents: 0, chain: 'credit-code', raw: { source: 'redeem-credits' }, user_id: u.id })
     this.store.settlePayment(ref, 'credit', { source: 'redeem-credits' }, true)
+    this.onPremium?.(u)
     return true
   }
 
