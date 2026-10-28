@@ -12,6 +12,8 @@ import { ringFooter } from './ring-footer.js'
 import { RING_PLACEHOLDER } from './ring.js'
 import type { Incident, Kind, Source } from './sources.js'
 import { CHAIN_LABELS } from './premium.js'
+import type { PublicEndpoint } from '@profullstack/webhooks'
+import { WEBHOOK_EVENTS } from './hooks.js'
 import { VERSION } from './version.js'
 import { distanceText } from './worker.js'
 
@@ -345,7 +347,17 @@ bunx @profullstack/residentalerts radio 29.76 -95.37
 bunx @profullstack/residentalerts watch 47.61 -122.33   # live terminal view</code></pre>
 <h2>MCP</h2>
 <pre><code>claude mcp add residentalerts -- bunx @profullstack/residentalerts mcp</code></pre>
-<p>Tools: <code>incidents_near</code>, <code>serious_incidents</code>, <code>get_incident</code>, <code>radio_near</code>, <code>incident_comments</code>, <code>area_chat</code>, <code>coverage</code>.</p>
+<p>Tools: <code>incidents_near</code>, <code>serious_incidents</code>, <code>fires_near</code>, <code>fire_conditions</code>, <code>get_incident</code>, <code>radio_near</code>, <code>incident_comments</code>, <code>area_chat</code>, <code>coverage</code>, and with <code>RESIDENTALERTS_KEY</code> set: <code>list_webhooks</code>, <code>create_webhook</code>, <code>test_webhook</code>, <code>rotate_webhook_secret</code>, <code>delete_webhook</code>, <code>webhook_deliveries</code>.</p>
+<h2 id="webhooks">Webhooks</h2>
+<p>Your server can hear what your alerts say. Add an endpoint on <a href="/account#webhooks">your account</a>, or with your API key (<code>rak_…</code>, made on the account page; a Premium key on your account works too):</p>
+<pre><code>GET    ${SITE}/api/v1/webhooks                       # your endpoints + event types
+POST   ${SITE}/api/v1/webhooks {"url","events":["alert.*"],"description"}   -> { endpoint, secret }
+GET    ${SITE}/api/v1/webhooks/&lt;id&gt;/secret · POST …/&lt;id&gt;/rotate · POST …/&lt;id&gt;/test · DELETE …/&lt;id&gt;
+GET    ${SITE}/api/v1/webhooks/deliveries            # the delivery log
+Authorization: Bearer rak_…
+
+residentalerts webhook add https://example.com/hooks/ra --events alert.issued,alert.ended</code></pre>
+<p>Events: ${WEBHOOK_EVENTS.map((e) => `<code>${esc(e)}</code>`).join(', ')}. <code>alert.issued</code> is a new incident in one of the places saved to your account (with which place and how far); <code>alert.updated</code> and <code>alert.ended</code> follow an incident you were sent; <code>premium.activated</code> is your own Premium switching on. Bodies are CloudEvents JSON with the incident as the public map shows it (never who reported it), signed per <a href="https://www.standardwebhooks.com/">Standard Webhooks</a> (<code>webhook-id</code>, <code>webhook-timestamp</code>, <code>webhook-signature</code>; verify with <code>@profullstack/webhooks</code> or any Standard Webhooks library) and retried for about three days.</p>
 <h2>Community API</h2>
 <pre><code>POST /api/v1/residents {"name":"Tony"}          -> { token: "rt_…" }   (send as Authorization: Bearer rt_…)
 GET|POST /api/v1/incidents/&lt;id&gt;/comments {"text","media":[ids]}
@@ -418,7 +430,7 @@ export function confirmSigninPage(ctx: Ctx, o: { token: string; next: string; ok
   return layout({ title: 'Sign in · resident.alerts', description: 'Finish signing in.', path: '/signin', noindex: true, body, ctx })
 }
 
-export function accountPage(ctx: Ctx, o: { email: string; verified: boolean; suggestEmail: string; coinpay: boolean; coinpayOn: boolean; premium: boolean; since: number | null; news: boolean; places: number; price: string; flash?: string; error?: string }): string {
+export function accountPage(ctx: Ctx, o: { email: string; verified: boolean; suggestEmail: string; coinpay: boolean; coinpayOn: boolean; premium: boolean; since: number | null; news: boolean; places: number; price: string; flash?: string; error?: string; webhooks?: PublicEndpoint[]; apiKeySince?: number | null; apiKey?: string; webhookSecret?: string }): string {
   const body = `<h1>Your account</h1>
 ${o.flash ? `<p class="ok">${esc(o.flash)}</p>` : ''}${o.error ? `<p class="error">${esc(o.error)}</p>` : ''}
 <p class="lede">${esc(o.email)}</p>
@@ -452,12 +464,35 @@ ${o.flash ? `<p class="ok">${esc(o.flash)}</p>` : ''}${o.error ? `<p class="erro
     <button class="btn primary">Confirm my email</button>
   </form>`}
 </section>
+${o.webhooks ? webhooksCard(o) : ''}
 ${o.coinpayOn ? `<section class="card"><h2>CoinPay</h2>${o.coinpay ? '<p>✓ Connected. You can sign in with CoinPay.</p>' : '<p>Connect your CoinPay account to sign in with it, without waiting for an email.</p><p><a class="btn coinpay" href="/auth/coinpay/start?next=/account">Connect CoinPay</a></p>'}</section>` : ''}
 <p class="row wrap"><form method="post" action="/signout"><button class="btn">Sign out</button></form></p>
 <details class="danger"><summary>Delete my account</summary>
   <form method="post" action="/account"><input type="hidden" name="action" value="delete"><label class="check"><input type="checkbox" name="sure" value="1"> Yes, delete my email, saved places and Premium on this account</label><button class="btn">Delete</button></form>
 </details>`
   return layout({ title: 'Account · resident.alerts', description: 'Your resident.alerts account.', path: '/account', noindex: true, body, ctx })
+}
+
+/** Webhooks + the API key, on the account page. */
+function webhooksCard(o: { webhooks?: PublicEndpoint[]; apiKeySince?: number | null; apiKey?: string; webhookSecret?: string; places: number }): string {
+  const secretBox = (label: string, v: string) => `<p class="muted">${esc(label)}</p><pre class="copyable"><code>${esc(v)}</code></pre>`
+  const rows = (o.webhooks ?? [])
+    .map(
+      (w) => `<li><b>${esc(w.url)}</b> <span class="muted">${esc(w.events.join(', '))}${w.description ? ` · ${esc(w.description)}` : ''}${w.enabled ? '' : ` · OFF${w.disabled_reason ? ` (${esc(w.disabled_reason)})` : ''}`}</span>
+  <span class="row wrap">${(['test', 'secret', 'rotate', 'delete'] as const).map((a) => `<form method="post" action="/account/webhooks/${a}"><input type="hidden" name="id" value="${esc(w.id)}"><button class="btn${a === 'test' ? '' : ' ghost'}">${a === 'test' ? 'Send a test' : a === 'secret' ? 'Show secret' : a === 'rotate' ? 'New secret' : 'Remove'}</button></form>`).join('')}</span></li>`,
+    )
+    .join('')
+  return `<section class="card" id="webhooks">
+  <h2>Webhooks</h2>
+  <p>Have your own server hear what your alerts say. resident.alerts POSTs ${WEBHOOK_EVENTS.map((e) => `<code>${esc(e)}</code>`).join(', ')} for incidents in the places saved to your account${o.places ? '' : ' (you have none yet: add one under Alerts on the map)'}, as CloudEvents JSON signed per <a href="https://www.standardwebhooks.com/">Standard Webhooks</a>, retried for about three days.</p>
+  ${o.webhookSecret ? secretBox('Signing secret (whsec_…):', o.webhookSecret) : ''}
+  ${rows ? `<ul class="hooks">${rows}</ul>` : '<p class="muted">No webhooks yet.</p>'}
+  <form method="post" action="/account/webhooks/add" class="row wrap"><input name="url" type="url" required placeholder="https://example.com/hooks/residentalerts" aria-label="Webhook URL"><input name="events" type="text" placeholder="Events (blank = all, or alert.*)" aria-label="Events"><button class="btn primary">Add webhook</button></form>
+  <h3>API key</h3>
+  ${o.apiKey ? secretBox('Your API key (shown once):', o.apiKey) : ''}
+  <p>${o.apiKeySince ? `You made an API key on ${esc(new Date(o.apiKeySince).toISOString().slice(0, 10))}.` : 'No API key yet.'} It manages webhooks from <code>residentalerts webhooks</code> (env <code>RESIDENTALERTS_KEY</code>), MCP and <code>/api/v1/webhooks</code> (<code>authorization: Bearer rak_…</code>).</p>
+  <form method="post" action="/account"><input type="hidden" name="action" value="apikey"><button class="btn">${o.apiKeySince ? 'Replace my API key' : 'Make an API key'}</button></form>
+</section>`
 }
 
 /** Where an invite link lands: the invite rides in a cookie until they sign up. */

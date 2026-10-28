@@ -9,6 +9,7 @@
  */
 import type { Device, Store } from './db.js'
 import type { Geocoder } from './geocode.js'
+import type { AccountAlerts } from './hooks.js'
 import type { Pusher } from './push.js'
 import { inShape, km, type Incident, type Kind, type Source } from './sources.js'
 
@@ -59,7 +60,7 @@ export function message(i: Incident, place: { name: string; km: number }) {
   }
 }
 
-export type WorkerDeps = { store: Store; sources: Source[]; pusher: Pusher; geo?: Geocoder; fetch?: typeof fetch; log?: (...a: unknown[]) => void }
+export type WorkerDeps = { store: Store; sources: Source[]; pusher: Pusher; geo?: Geocoder; fetch?: typeof fetch; log?: (...a: unknown[]) => void; alerts?: AccountAlerts }
 
 /**
  * Push fresh incidents to every device they concern. Returns how many pushes went out.
@@ -94,7 +95,7 @@ export function followMessage(i: Incident, ended: boolean) {
   }
 }
 
-const digest = (i: Incident, ended: boolean) => (ended ? 'ended' : `${i.severity}|${i.title}|${i.detail}`).replace(/[^\w%|.]+/g, '').slice(0, 120)
+export const followDigest = (i: Incident, ended: boolean) => (ended ? 'ended' : `${i.severity}|${i.title}|${i.detail}`).replace(/[^\w%|.]+/g, '').slice(0, 120)
 
 /** Tell the devices following an incident that it changed or ended. */
 export async function notifyFollowers(deps: Pick<WorkerDeps, 'store' | 'pusher'>, changed: Incident[], ended: Incident[], now = Date.now()): Promise<number> {
@@ -107,12 +108,26 @@ export async function notifyFollowers(deps: Pick<WorkerDeps, 'store' | 'pusher'>
     for (const e of events) {
       if (budget <= 0) break
       // The same numbers never go out twice, even if a feed flips back and forth.
-      if (!d.follows.includes(e.i.id) || !deps.store.markSent(d.id, `${e.i.id}#${digest(e.i, e.ended)}`)) continue
+      if (!d.follows.includes(e.i.id) || !deps.store.markSent(d.id, `${e.i.id}#${followDigest(e.i, e.ended)}`)) continue
       budget -= 1
       if (await deps.pusher.send(d, followMessage(e.i, e.ended))) sent += 1
     }
   }
   return sent
+}
+
+/** The same news for accounts' webhooks. Never in the way of reading a feed. */
+export async function accountWebhooks(alerts: AccountAlerts, fresh: Incident[], changed: Incident[], ended: Incident[], log?: (...a: unknown[]) => void): Promise<number> {
+  try {
+    // Changes first: a fire that only now reaches a place is news (issued), not an update.
+    let n = await alerts.changed(changed, ended)
+    n += await alerts.issued(fresh)
+    n += await alerts.issued(changed.filter((i) => i.kind === 'fire' && i.shape), true)
+    return n
+  } catch (e) {
+    log?.(`[webhooks] ${e instanceof Error ? e.message : String(e)}`)
+    return 0
+  }
 }
 
 /** Read one source now: store, then push what is new. */
@@ -129,8 +144,9 @@ export async function readSource(deps: WorkerDeps, s: Source, opts: { first: boo
       pushed += await fanOut(deps, changed.filter((i) => i.kind === 'fire' && i.shape), now, true)
       pushed += await notifyFollowers(deps, changed, ended, now)
     }
-    if (fresh.length || pushed) deps.log?.(`[${s.id}] ${list.length} read, ${fresh.length} new, ${pushed} pushed`)
-    return { ok: true, read: list.length, fresh: fresh.length, pushed }
+    const hooked = opts.first || !deps.alerts ? 0 : await accountWebhooks(deps.alerts, fresh, changed, ended, deps.log)
+    if (fresh.length || pushed || hooked) deps.log?.(`[${s.id}] ${list.length} read, ${fresh.length} new, ${pushed} pushed${hooked ? `, ${hooked} to webhooks` : ''}`)
+    return { ok: true, read: list.length, fresh: fresh.length, pushed, hooked }
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e)
     // Back off a failing source: twice its interval, up to 15 minutes.
@@ -157,7 +173,10 @@ export function startWorker(deps: WorkerDeps): () => void {
   }
   tick()
   const timer = setInterval(tick, 15_000)
-  const prune = setInterval(() => deps.log?.(`[prune] ${deps.store.prune(30)} old incidents removed`), 6 * 3600_000)
+  const prune = setInterval(() => {
+    deps.log?.(`[prune] ${deps.store.prune(30)} old incidents removed`)
+    deps.alerts?.prune(30)
+  }, 6 * 3600_000)
   return () => {
     stopped = true
     clearInterval(timer)

@@ -3,7 +3,8 @@
  *
  *   claude mcp add residentalerts -- bunx @profullstack/residentalerts mcp
  *
- * Read-only and keyless: what police, fire and EMS are being sent to, where.
+ * Keyless for reading what police, fire and EMS are being sent to, where. The
+ * webhook tools manage your account's webhooks with RESIDENTALERTS_KEY (rak_…).
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -54,6 +55,17 @@ export function createMcpServer(client = new AlertsClient()): McpServer {
   server.tool('radio_near', 'Police, fire and EMS scanner feeds for the US county at a point (Broadcastify links, live status, listeners).', { lat: z.number(), lon: z.number() }, wrap(({ lat, lon }: any) => client.radio(lat, lon)))
   server.tool('incident_comments', 'What residents said about an incident (text plus links to their photos and videos).', { id: z.string().min(3).max(200) }, wrap(({ id }: any) => client.comments(id)))
   server.tool('area_chat', 'Recent messages in the neighborhood chat for the ~40 km area around a point.', { lat: z.number(), lon: z.number() }, wrap(({ lat, lon }: any) => client.chat(lat, lon)))
+  server.tool('list_webhooks', "Your account's webhook endpoints and the event types resident.alerts sends (needs RESIDENTALERTS_KEY, an API key from /account).", {}, wrap(() => client.webhooks()))
+  server.tool(
+    'create_webhook',
+    'Have resident.alerts POST alerts for the places saved to your account (alert.issued, alert.updated, alert.ended) and premium.activated to a URL, as signed CloudEvents (Standard Webhooks). Returns the signing secret. events: patterns like "alert.*"; omit for all.',
+    { url: z.string().url(), events: z.array(z.string()).optional(), description: z.string().max(200).optional() },
+    wrap(({ url, events, description }: any) => client.addWebhook(url, events, description ?? '')),
+  )
+  server.tool('test_webhook', 'Send a webhook.test event to one of your endpoints now and say how it went.', { id: z.string() }, wrap(({ id }: any) => client.testWebhook(id)))
+  server.tool('rotate_webhook_secret', "Replace an endpoint's signing secret; the old one stops working.", { id: z.string() }, wrap(({ id }: any) => client.rotateWebhook(id)))
+  server.tool('delete_webhook', 'Remove a webhook endpoint.', { id: z.string() }, wrap(({ id }: any) => client.removeWebhook(id)))
+  server.tool('webhook_deliveries', 'Recent webhook deliveries (status, attempts, payload), optionally for one endpoint.', { id: z.string().optional() }, wrap(({ id }: any) => client.webhookLog(id)))
   server.tool('coverage', 'Which feeds resident.alerts reads, whether each is healthy, and how many calls each had in the last 24 hours.', {}, wrap(() => client.sources()))
   return server
 }

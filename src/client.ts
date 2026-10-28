@@ -1,8 +1,10 @@
 /**
  * The resident.alerts API from anywhere: the CLI, the TUI and the MCP server
  * use this. RESIDENTALERTS_URL points it at another instance. The API is open;
- * RESIDENTALERTS_KEY (a Premium key) adds history past 24 hours.
+ * RESIDENTALERTS_KEY (a Premium key) adds history past 24 hours, and an account
+ * API key (rak_…, from /account) or a Premium key on an account manages webhooks.
  */
+import type { PublicDelivery, PublicEndpoint } from '@profullstack/webhooks'
 import type { Radio } from './radio.js'
 import type { Incident, Kind } from './sources.js'
 import type { Conditions } from './wildfire.js'
@@ -22,18 +24,59 @@ export class ApiError extends Error {
 
 export class AlertsClient {
   readonly base: string
-  constructor(base = process.env.RESIDENTALERTS_URL ?? DEFAULT_URL, private readonly doFetch: typeof fetch = fetch) {
+  constructor(
+    base = process.env.RESIDENTALERTS_URL ?? DEFAULT_URL,
+    private readonly doFetch: typeof fetch = fetch,
+    private readonly key = process.env.RESIDENTALERTS_KEY ?? '',
+  ) {
     this.base = base.replace(/\/+$/, '')
   }
 
-  private async get<T>(path: string): Promise<T> {
+  private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
     const headers: Record<string, string> = { accept: 'application/json', 'user-agent': 'residentalerts-cli' }
-    // RESIDENTALERTS_KEY (a Premium key) opens history past 24 hours.
-    if (process.env.RESIDENTALERTS_KEY) headers['x-premium-key'] = process.env.RESIDENTALERTS_KEY
-    const r = await this.doFetch(`${this.base}/api/v1${path}`, { headers, signal: AbortSignal.timeout(20_000) })
-    const body = (await r.json().catch(() => ({}))) as any
-    if (!r.ok) throw new ApiError(body?.error ?? `HTTP ${r.status}`, r.status)
-    return body as T
+    // RESIDENTALERTS_KEY: a Premium key opens history past 24 hours; an account key (or one on an account) manages webhooks.
+    if (this.key) headers['x-premium-key'] = this.key
+    if (body !== undefined) headers['content-type'] = 'application/json'
+    const r = await this.doFetch(`${this.base}/api/v1${path}`, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(20_000) })
+    const out = (await r.json().catch(() => ({}))) as any
+    if (!r.ok) throw new ApiError(out?.error ?? `HTTP ${r.status}`, r.status)
+    return out as T
+  }
+  private get<T>(path: string): Promise<T> {
+    return this.call<T>('GET', path)
+  }
+  private needKey() {
+    if (!this.key) throw new ApiError(`webhooks need your API key: make one at ${this.base}/account#webhooks and set RESIDENTALERTS_KEY`, 401)
+  }
+
+  // ---- webhooks (your account's; RESIDENTALERTS_KEY) ----
+  webhooks() {
+    this.needKey()
+    return this.call<{ endpoints: PublicEndpoint[]; event_types: string[] }>('GET', '/webhooks')
+  }
+  addWebhook(url: string, events?: string[], description = '') {
+    this.needKey()
+    return this.call<{ endpoint: PublicEndpoint; secret: string }>('POST', '/webhooks', { url, ...(events?.length ? { events } : {}), description })
+  }
+  testWebhook(id: string) {
+    this.needKey()
+    return this.call<{ ok: boolean; status: number | null; error?: string }>('POST', `/webhooks/${encodeURIComponent(id)}/test`)
+  }
+  webhookSecret(id: string) {
+    this.needKey()
+    return this.call<{ secret: string }>('GET', `/webhooks/${encodeURIComponent(id)}/secret`)
+  }
+  rotateWebhook(id: string) {
+    this.needKey()
+    return this.call<{ secret: string }>('POST', `/webhooks/${encodeURIComponent(id)}/rotate`)
+  }
+  removeWebhook(id: string) {
+    this.needKey()
+    return this.call<{ ok: boolean }>('DELETE', `/webhooks/${encodeURIComponent(id)}`)
+  }
+  webhookLog(id?: string) {
+    this.needKey()
+    return this.call<{ deliveries: PublicDelivery[] }>('GET', id ? `/webhooks/${encodeURIComponent(id)}/deliveries` : '/webhooks/deliveries')
   }
 
   async incidents(q: Query = {}): Promise<ApiIncident[]> {

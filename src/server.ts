@@ -12,6 +12,7 @@
 import { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { webhooksApi, type Webhooks } from '@profullstack/webhooks'
 import { Hono, type Context } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { Accounts, createMailer, EMAIL, hasEmail, mailConfig, type Mailer, type User } from './accounts.js'
@@ -23,6 +24,7 @@ import { Community } from './community.js'
 import { mountCommunity } from './community-routes.js'
 import { cleanKinds, cleanPlaces, MAX_PLACES, Store } from './db.js'
 import { Geocoder } from './geocode.js'
+import { AccountAlerts, createHooks } from './hooks.js'
 import { aboutPage, accountPage, apiPage, confirmSigninPage, coveragePage, homePage, incidentPage, invitedPage, invitesPage, messagePage, premiumKeyPage, premiumPage, radioPage, signinPage, type Ctx } from './html.js'
 import { startPitFooterRefresh } from './pit-footer.js'
 import { createPusher, pushConfig, type Pusher } from './push.js'
@@ -63,6 +65,10 @@ export type Deps = {
   oauth?: CoinPayOAuth
   hotspots?: Hotspots
   conditions?: ConditionsFinder
+  /** Customer webhooks: endpoints per account (needs accounts). */
+  hooks?: Webhooks
+  /** Emits alerts and Premium to accounts' webhooks. */
+  alerts?: AccountAlerts
   secureCookies?: boolean
   fetch?: typeof fetch
 }
@@ -134,6 +140,7 @@ export function createApp(deps: Deps) {
   const deviceLimit = new Limiter(30, 60 * 60_000)
   const testLimit = new Limiter(5, 60 * 60_000)
   const layerLimit = new Limiter(60, 60_000)
+  const hookWriteLimit = new Limiter(60, 60 * 60_000)
 
   const direct = (c: Context) => visitorOnMoshpit(SELF, c.req.header('host'), c.req.header('x-moshpit-name'))
   const https = (c: Context) => (c.req.header('x-forwarded-proto') ?? 'https') === 'https'
@@ -164,7 +171,8 @@ export function createApp(deps: Deps) {
   const keyOf = (c: Context) => c.req.header('x-premium-key') ?? (c.req.header('authorization') ?? '').replace(/^Bearer\s+/i, '')
   const PRICE = price(deps.premium.cents)
   /** Credit codes and invites: they hang off accounts, so only with accounts on. */
-  const codes = deps.accounts ? new Codes(store, deps.accounts, deps.premium) : null
+  const codes = deps.accounts ? new Codes(store, deps.accounts, deps.premium, (u) => void deps.alerts?.premium(u.id, 'credit-code').catch((e) => console.error('[webhooks]', e))) : null
+  const hooks = deps.accounts ? deps.hooks : undefined
   const cookieOpts = (c: Context, maxAge: number) => ({ httpOnly: true, secure: deps.secureCookies ?? https(c), sameSite: 'Lax' as const, path: '/', maxAge })
   /** A new account: spend the invite it came through and credit the affiliate link it arrived by. */
   const welcomeNew = async (c: Context, u: User, created: boolean) => {
@@ -201,7 +209,7 @@ export function createApp(deps: Deps) {
     const urls = [...paths.map((p) => `${RELAY_ORIGIN}${p}`), ...recent.map((i) => `${RELAY_ORIGIN}/i/${encodeURIComponent(i.id)}`)]
     return c.body(`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls.map((u) => `<url><loc>${u.replace(/&/g, '&amp;')}</loc></url>`).join('')}</urlset>`, 200, { 'content-type': 'application/xml' })
   })
-  app.get('/llms.txt', (c) => c.text(`# resident.alerts\n\nLive 911 incidents (police, fire, medical, traffic) from US city open-data feeds, plus NWS warnings, USGS earthquakes, wildfires with perimeters (NIFC, CAL FIRE) and evacuation zones. Free, no key.\n\n- GET ${RELAY_ORIGIN}/api/v1/incidents?lat=&lon=&km=&hours=&kinds=&min_severity=\n- GET ${RELAY_ORIGIN}/api/v1/fires?lat=&lon=&km=\n- GET ${RELAY_ORIGIN}/api/v1/hotspots?s=&w=&n=&e=\n- GET ${RELAY_ORIGIN}/api/v1/conditions?lat=&lon=\n- GET ${RELAY_ORIGIN}/api/v1/incidents/{id}\n- GET ${RELAY_ORIGIN}/api/v1/radio?lat=&lon=\n- GET ${RELAY_ORIGIN}/api/v1/sources\n- MCP: bunx @profullstack/residentalerts mcp\n`))
+  app.get('/llms.txt', (c) => c.text(`# resident.alerts\n\nLive 911 incidents (police, fire, medical, traffic) from US city open-data feeds, plus NWS warnings, USGS earthquakes, wildfires with perimeters (NIFC, CAL FIRE) and evacuation zones. Free, no key.\n\n- GET ${RELAY_ORIGIN}/api/v1/incidents?lat=&lon=&km=&hours=&kinds=&min_severity=\n- GET ${RELAY_ORIGIN}/api/v1/fires?lat=&lon=&km=\n- GET ${RELAY_ORIGIN}/api/v1/hotspots?s=&w=&n=&e=\n- GET ${RELAY_ORIGIN}/api/v1/conditions?lat=&lon=\n- GET ${RELAY_ORIGIN}/api/v1/incidents/{id}\n- GET ${RELAY_ORIGIN}/api/v1/radio?lat=&lon=\n- GET ${RELAY_ORIGIN}/api/v1/sources\n- MCP: bunx @profullstack/residentalerts mcp\n- Webhooks (your account's alerts, signed CloudEvents): ${RELAY_ORIGIN}/api#webhooks\n`))
 
   const TYPES: Record<string, string> = { css: 'text/css; charset=utf-8', js: 'text/javascript; charset=utf-8', svg: 'image/svg+xml', png: 'image/png', webmanifest: 'application/manifest+json', html: 'text/html; charset=utf-8', crt: 'application/x-x509-ca-cert' }
   app.get('/:file{(style\\.css|app\\.js|community\\.js|sw\\.js|favicon\\.svg|icon-192\\.png|icon-512\\.png|manifest\\.webmanifest|offline\\.html|moshpit-root-ca\\.crt)}', async (c) => {
@@ -309,8 +317,11 @@ export function createApp(deps: Deps) {
       deleteCookie(c, SESSION, { path: '/' })
       return c.redirect('/')
     })
-    const accountView = (c: Context, u: User, extra: { flash?: string; error?: string } = {}, status = 200) =>
-      page(c, accountPage(ctxOf(c), { email: displayEmail(u), verified: hasEmail(u), suggestEmail: u.unverified_email ?? '', coinpay: acc.identities(u.id).some((i) => i.provider === 'coinpay'), coinpayOn: Boolean(deps.oauth), premium: accountPremium(u), since: acc.premiumSince(u), news: Boolean(u.news), places: u.places.length, price: PRICE, ...extra }), status)
+    const accountView = async (c: Context, u: User, extra: { flash?: string; error?: string; apiKey?: string; webhookSecret?: string } = {}, status = 200) => {
+      c.header('cache-control', 'no-store')
+      const webhooks = hooks ? { webhooks: await hooks.listEndpoints(u.id), apiKeySince: acc.apiKeySince(u.id) } : {}
+      return page(c, accountPage(ctxOf(c), { email: displayEmail(u), verified: hasEmail(u), suggestEmail: u.unverified_email ?? '', coinpay: acc.identities(u.id).some((i) => i.provider === 'coinpay'), coinpayOn: Boolean(deps.oauth), premium: accountPremium(u), since: acc.premiumSince(u), news: Boolean(u.news), places: u.places.length, price: PRICE, ...webhooks, ...extra }), status)
+    }
     app.get('/account', async (c) => {
       const u = userOf(c)
       if (!u) return c.redirect('/signin?next=/account')
@@ -350,6 +361,9 @@ export function createApp(deps: Deps) {
           const sent = deps.mail ? await deps.mail({ to: email, subject: 'Confirm your email for resident.alerts', text: `Confirm this email for your resident.alerts account:\n\n${origin(c)}/auth/${t}?next=/account\n\nIt works once, for 20 minutes. If you didn't ask for this, ignore it.\n` }) : false
           return sent ? accountView(c, u, { flash: `We sent a link to ${email}. Open it to confirm.` }) : accountView(c, u, { error: 'We could not send the email just now.' }, 502)
         }
+        case 'apikey':
+          if (!hooks) return c.redirect('/account')
+          return accountView(c, u, { flash: 'Your new API key is below. Copy it now: it is not shown again, and any older key has stopped working.', apiKey: acc.newApiKey(u.id) })
         case 'delete':
           if (f.sure !== '1') return accountView(c, u, { error: 'Tick the box to delete your account.' }, 400)
           acc.deleteUser(u.id)
@@ -358,6 +372,39 @@ export function createApp(deps: Deps) {
       }
       return c.redirect('/account')
     })
+
+    // ---- webhooks, from the account page (the API below does the same with a key) ------
+    if (hooks) {
+      app.post('/account/webhooks/:action{(add|test|secret|rotate|delete)}', async (c) => {
+        const u = userOf(c)
+        if (!u) return c.redirect('/signin?next=/account')
+        if (!hookWriteLimit.allow(`hook:${u.id}`)) return accountView(c, u, { error: 'Too many changes. Wait a few minutes.' }, 429)
+        const f = (await c.req.parseBody()) as Record<string, string>
+        const id = String(f.id ?? '')
+        try {
+          switch (c.req.param('action')) {
+            case 'add': {
+              const events = String(f.events ?? '').split(/[\s,]+/).filter(Boolean)
+              const r = await hooks.createEndpoint(u.id, { url: String(f.url ?? '').trim(), ...(events.length ? { events } : {}), description: String(f.description ?? '').slice(0, 200) })
+              return accountView(c, u, { flash: 'Webhook added. Its signing secret is below (and under "Show secret").', webhookSecret: r.secret })
+            }
+            case 'test': {
+              const r = await hooks.test(u.id, id)
+              return r.ok ? accountView(c, u, { flash: `Test delivered (HTTP ${r.status}).` }) : accountView(c, u, { error: `Test failed: ${r.error ?? `HTTP ${r.status}`}` })
+            }
+            case 'secret':
+              return accountView(c, u, { flash: 'Signing secret for that webhook:', webhookSecret: (await hooks.secret(u.id, id)).secret })
+            case 'rotate':
+              return accountView(c, u, { flash: 'New signing secret below; the old one has stopped working.', webhookSecret: (await hooks.rotateSecret(u.id, id)).secret })
+            default:
+              await hooks.deleteEndpoint(u.id, id)
+              return accountView(c, u, { flash: 'Webhook removed.' })
+          }
+        } catch (e) {
+          return accountView(c, u, { error: e instanceof Error ? e.message : String(e) }, 400)
+        }
+      })
+    }
 
     // ---- invites and affiliate links ------------------------------------------------
     // /i/ is an incident page, so an invite lands on /invite/<code>.
@@ -431,7 +478,11 @@ export function createApp(deps: Deps) {
     const known = ref ? store.payment(String(ref)) : null
     if (!known) return c.json({ ok: true, ignored: 'unknown payment' })
     const wasPaid = store.licensePaid(known.license_hash ?? '-')
+    const wasSettled = SETTLED.has(known.status)
     store.settlePayment(known.ref, status, payload, SETTLED.has(status))
+    if (known.user_id && SETTLED.has(status) && !wasPaid && !wasSettled) {
+      await deps.alerts?.premium(known.user_id, 'payment', { chain: known.chain, amount_usd: known.amount_cents / 100 }).catch((e) => console.error('[webhooks]', e))
+    }
     // A receipt, once, to the account that paid.
     const u = known.user_id && deps.accounts ? deps.accounts.user(known.user_id) : null
     // Receipts go only to an email the buyer proved is theirs.
@@ -637,7 +688,26 @@ export function createApp(deps: Deps) {
     return c.body(deps.accounts.newsCsv(), 200, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="resident-alerts-emails.csv"' })
   })
 
-  if (deps.community) mountCommunity(app, api, { store, community: deps.community, pusher, ...(deps.accounts ? { userOf, banUser: (id: string) => deps.accounts!.ban(id) } : {}) })
+  // ---- customer webhooks: the @profullstack/webhooks API, scoped to one account ------
+  // An account API key (rak_…, made on /account), a Premium key that belongs to an
+  // account, or the signed-in session from our own pages. No CORS: it is not for browsers elsewhere.
+  if (hooks && deps.accounts) {
+    const acc = deps.accounts
+    const owners = new WeakMap<Request, string>()
+    const hooksApi = webhooksApi(hooks, { basePath: '/api/v1/webhooks', owner: (req) => owners.get(req) })
+    const route = async (c: Context) => {
+      const key = keyOf(c).trim()
+      const u = key.startsWith('rak_') ? acc.byApiKey(key) : key ? acc.byPremiumKey(deps.premium, key) : userOf(c)
+      if (!u) return c.json({ error: `send your API key: authorization: Bearer rak_… (make one at ${RELAY_ORIGIN}/account#webhooks)` }, 401)
+      if (c.req.method !== 'GET' && !hookWriteLimit.allow(`hook:${u.id}`)) return c.json({ error: 'too many changes; wait a few minutes' }, 429)
+      owners.set(c.req.raw, u.id)
+      return (await hooksApi(c.req.raw)) ?? c.json({ error: 'not found' }, 404)
+    }
+    app.all('/api/v1/webhooks', route)
+    app.all('/api/v1/webhooks/*', route)
+  }
+
+  if (deps.community) mountCommunity(app, api, { store, community: deps.community, pusher, ...(deps.alerts ? { alerts: deps.alerts } : {}), ...(deps.accounts ? { userOf, banUser: (id: string) => deps.accounts!.ban(id) } : {}) })
   app.route('/api/v1', api)
 
   app.notFound((c) => page(c, messagePage(ctxOf(c), { title: 'Not found', message: 'Nothing lives at this address.' }), 404))
@@ -664,12 +734,17 @@ export async function serve(opts: { port?: number } = {}) {
   const mail = createMailer(mailConfig(env))
   const oc = oauthConfig(env)
   const oauth = oc ? new CoinPayOAuth(store.db, oc) : undefined
-  const app = createApp({ store, sources, pusher, radio, premium: premiumConfig(env), community, accounts, mail, hotspots: new Hotspots(), conditions: new ConditionsFinder(), ...(oauth ? { oauth } : {}) })
+  // Customer webhooks: signed with each endpoint's own secret, retried from the database for about three days.
+  const hooks = createHooks(store.db, { source: RELAY_ORIGIN })
+  const alerts = new AccountAlerts(store.db, hooks, RELAY_ORIGIN)
+  const app = createApp({ store, sources, pusher, radio, premium: premiumConfig(env), community, accounts, mail, hotspots: new Hotspots(), conditions: new ConditionsFinder(), hooks, alerts, ...(oauth ? { oauth } : {}) })
+  // Deliveries waiting from before a restart go out now, then every 5 s.
+  hooks.start()
   // The relay hostname, so pit.world serves the Moshpit footer template.
   startPitFooterRefresh('resident.alerts.pit.world')
   startRingFooterRefresh()
   startRingRefresh()
-  if (env.WORKER !== 'off') startWorker({ store, sources, pusher, geo, log: console.log })
+  if (env.WORKER !== 'off') startWorker({ store, sources, pusher, geo, alerts, log: console.log })
   const port = opts.port ?? Number(env.PORT ?? 8806)
   return Bun.serve({ port, hostname: env.HOST ?? '127.0.0.1', fetch: app.fetch, idleTimeout: 30 })
 }

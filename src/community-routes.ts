@@ -9,6 +9,7 @@ import { AREA_ROOM, areaRoom, cleanName, CONFIRMS_TO_ALERT, VIDEO_MAX, type Comm
 import type { Store } from './db.js'
 import type { Pusher } from './push.js'
 import { fanOut } from './worker.js'
+import type { AccountAlerts } from './hooks.js'
 
 class Limiter {
   private hits = new Map<string, { n: number; reset: number }>()
@@ -28,7 +29,7 @@ class Limiter {
 const HOUR = 3600_000
 const DAY = 24 * HOUR
 
-export function mountCommunity(app: Hono, api: Hono, deps: { store: Store; community: Community; pusher: Pusher; userOf?: (c: Context) => { id: string } | null; banUser?: (id: string) => void }) {
+export function mountCommunity(app: Hono, api: Hono, deps: { store: Store; community: Community; pusher: Pusher; alerts?: AccountAlerts; userOf?: (c: Context) => { id: string } | null; banUser?: (id: string) => void }) {
   const { community: cm, store } = deps
   const ip = (c: Context) => c.req.header('x-real-ip') ?? 'local'
   const token = (c: Context) => (c.req.header('authorization') ?? '').replace(/^Bearer\s+/i, '') || c.req.header('x-resident-token')
@@ -161,7 +162,10 @@ export function mountCommunity(app: Hono, api: Hono, deps: { store: Store; commu
     if (out.alert) {
       const inc = store.incident(c.req.param('id'))
       // Confirmed by enough people: alert like any other call, as if it had just come in.
-      if (inc) await fanOut({ store, pusher: deps.pusher }, [{ ...inc, at: Date.now(), title: `${inc.title} (resident report)` }])
+      const confirmed = inc && { ...inc, at: Date.now(), title: `${inc.title} (resident report)` }
+      if (confirmed) await fanOut({ store, pusher: deps.pusher }, [confirmed])
+      // Accounts whose places it is in hear it too: the report as the map shows it, never who made it.
+      if (confirmed && deps.alerts) await deps.alerts.issued([confirmed]).catch((e) => console.error('[webhooks]', e))
     }
     return c.json({ confirms: out.confirms, needed: CONFIRMS_TO_ALERT, alerted: out.alert })
   })

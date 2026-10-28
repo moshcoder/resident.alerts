@@ -65,6 +65,29 @@ invite gives neither person anything beyond the invite: we only remember who
 brought whom. Every account also has an affiliate link (`/?ref=<code>`),
 remembered first-touch for 30 days and credited to new accounts.
 
+## Webhooks
+
+Customer webhooks via [`@profullstack/webhooks`](https://github.com/profullstack/webhooks):
+an account adds endpoints on `/account#webhooks`, with `residentalerts webhook add <url>`,
+MCP `create_webhook`, or `POST /api/v1/webhooks`. The API takes an account API key
+(`Authorization: Bearer rak_…`, made on `/account`, stored hashed, one per account), a
+Premium key that belongs to an account (`X-Premium-Key`), or the signed-in session from our
+own pages; anything else is 401. Bodies are CloudEvents, signed per Standard Webhooks,
+queued in the app's SQLite (`webhook_endpoints`, `webhook_deliveries`) and retried for about
+three days; URLs must be https to public addresses.
+
+| Event | When | Owner |
+| --- | --- | --- |
+| `alert.issued` | a new incident (or a fire that grew into it) in a place saved to the account | the account whose places it is in |
+| `alert.updated` / `alert.ended` | an incident the account was sent changed / stopped being listed | same |
+| `premium.activated` | the account's Premium switched on (payment settled, or a credit code) | the account |
+
+Devices stay anonymous push subscriptions, so they own no webhooks. A payload carries the
+incident as the public map shows it plus which of the owner's places it concerns: never a
+resident's name, token or media, nor anyone else's places. Same 30-minute freshness rule as
+push, at most 200 events an account an hour; deleting an account deletes its webhooks, and
+merging accounts moves them.
+
 ## Community
 
 Residents (`rt_` token + name, tied to an account): comments on every

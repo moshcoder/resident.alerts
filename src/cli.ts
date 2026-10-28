@@ -10,6 +10,8 @@
  *   residentalerts comments <id> [--json]             what neighbors said about an incident
  *   residentalerts chat <lat> <lon> [--json]          the area chat there
  *   residentalerts watch <lat> <lon> [--km 3]         live terminal view (also: residentalerts tui)
+ *   residentalerts webhooks                            your account's webhooks (RESIDENTALERTS_KEY)
+ *   residentalerts webhook add <url> [--events alert.*] | test|secret|rotate|rm <id> | log [id]
  *   residentalerts mcp                                 MCP server on stdio
  *   residentalerts serve                               run the web server yourself
  */
@@ -28,10 +30,15 @@ const HELP = `residentalerts ${VERSION}: live 911 incidents near you (https://re
   residentalerts comments <id> [--json]
   residentalerts chat <lat> <lon> [--json]
   residentalerts watch <lat> <lon> [--km 3]     live terminal view
+  residentalerts webhooks                        your webhooks and the events we send
+  residentalerts webhook add <url> [--events alert.issued,alert.*] [--description ...]
+  residentalerts webhook test|secret|rotate|rm <id>
+  residentalerts webhook log [id]                recent deliveries
   residentalerts mcp                             MCP server on stdio
   residentalerts serve                           run the web server
 
-RESIDENTALERTS_URL points at another instance.`
+RESIDENTALERTS_URL points at another instance. RESIDENTALERTS_KEY is your API key
+(rak_…, made at https://resident.alerts.pit.world/account#webhooks) or a Premium key.`
 
 export function parseArgs(argv: string[]): { pos: string[]; flags: Record<string, string | true> } {
   const pos: string[] = []
@@ -146,6 +153,43 @@ export async function main(argv = process.argv.slice(2), out = (s: string) => co
         }
         if (flags.json) return json(posts), 0
         out(posts.length ? posts.map((p) => `${when(p.created_at).padStart(3)}  ${p.name}: ${p.text}${p.media.length ? `  [${p.media.length} ${p.media[0]!.kind}${p.media.length > 1 ? 's' : ''}] ${client.base}${p.media[0]!.url}` : ''}`).join('\n') : 'Nothing yet.')
+        return 0
+      }
+      case 'webhooks': {
+        const r = await client.webhooks()
+        if (flags.json) return json(r), 0
+        out([...r.endpoints.map((w) => `${w.id}  ${w.url}  ${w.events.join(',')}${w.enabled ? '' : `  OFF (${w.disabled_reason ?? 'disabled'})`}`), ...(r.endpoints.length ? [] : ['no webhooks yet']), `events: ${r.event_types.join(', ')}`].join('\n'))
+        return 0
+      }
+      case 'webhook': {
+        const [sub, arg] = pos
+        const need = (v: string | undefined, what: string) => {
+          if (!v) throw new Error(`usage: residentalerts webhook ${sub} <${what}>`)
+          return v
+        }
+        if (sub === 'add') {
+          const events = typeof flags.events === 'string' ? flags.events.split(',').map((e) => e.trim()).filter(Boolean) : undefined
+          const r = await client.addWebhook(need(arg, 'url'), events, typeof flags.description === 'string' ? flags.description : '')
+          if (flags.json) return json(r), 0
+          out(`${r.endpoint.id}  ${r.endpoint.url}  ${r.endpoint.events.join(',')}\nsigning secret: ${r.secret}`)
+        } else if (sub === 'test') {
+          const r = await client.testWebhook(need(arg, 'id'))
+          if (flags.json) return json(r), 0
+          out(r.ok ? `delivered (HTTP ${r.status})` : `failed: ${r.error ?? `HTTP ${r.status}`}`)
+          return r.ok ? 0 : 1
+        } else if (sub === 'secret' || sub === 'rotate') {
+          const r = sub === 'secret' ? await client.webhookSecret(need(arg, 'id')) : await client.rotateWebhook(need(arg, 'id'))
+          if (flags.json) return json(r), 0
+          out(r.secret)
+        } else if (sub === 'rm' || sub === 'remove' || sub === 'delete') {
+          const r = await client.removeWebhook(need(arg, 'id'))
+          if (flags.json) return json(r), 0
+          out('removed')
+        } else if (sub === 'log') {
+          const r = await client.webhookLog(arg)
+          if (flags.json) return json(r), 0
+          out(r.deliveries.length ? r.deliveries.map((d) => `${d.created_at}  ${d.event_type.padEnd(18)} ${d.status.padEnd(9)} ${d.last_status ?? '-'}  ${d.attempts} tries${d.last_error ? `  ${d.last_error}` : ''}`).join('\n') : 'no deliveries yet')
+        } else throw new Error(`residentalerts webhook ${sub ?? ''}? try add, test, secret, rotate, rm or log`)
         return 0
       }
       case 'watch':
