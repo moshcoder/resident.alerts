@@ -235,13 +235,12 @@
     load()
     setInterval(() => document.visibilityState === 'visible' && load(), 60000)
     if (fromMe) placeMe([lastMe.lat, lastMe.lon])
-    // Find you on every visit once you have allowed it (Safari often reports "prompt" even after Allow, so we
-    // remember that you said yes ourselves); a first-time visitor is asked straight away, once.
+    // Refresh a location previously allowed. Ask first-time visitors only after they tap a location control;
+    // some mobile browsers reject location requests made automatically during page load.
     const allowed = navigator.permissions ? navigator.permissions.query({ name: 'geolocation' }).then((p) => p.state).catch(() => 'unknown') : Promise.resolve('unknown')
     allowed.then((perm) => {
       if (params.get('lat') || perm === 'denied') return
       if (perm === 'granted' || store.get('locOK', false)) locate({ fly: !fromMe || perm === 'granted', quiet: true })
-      else if (!view && !store.get('locAsked', false)) { store.set('locAsked', true); locate({ fly: true }) }
     })
   })
 
@@ -270,7 +269,7 @@
         ? 'Location is off for this site. On iPhone: Settings → Privacy & Security → Location Services → Safari Websites → While Using, then reload.'
         : 'Location is off for this site. Click the lock or tune icon next to the address and allow Location, then reload.'
       : e && e.code === 2
-        ? 'Your device could not work out where it is. Turn on Wi-Fi or GPS and tap ◎ again.'
+        ? 'Your device could not get a location. Check that Location Services are on for your device and browser, then try again.'
         : 'Finding your location is taking a while. Tap ◎ to try again.'
 
   /**
@@ -279,17 +278,41 @@
    * remembered so the next visit opens on you.
    */
   let watchId = null
+  let locationRequest = null
+  let locationFeedback = false
   function locate(opts = {}) {
     const { fly = true, quiet = false } = typeof opts === 'boolean' ? { fly: opts } : opts
-    return new Promise((resolve) => {
-      if (!navigator.geolocation) { toast('This browser cannot share its location. Move the map to your area instead.'); return resolve(null) }
+    if (locationRequest) {
+      if (!quiet) { locationFeedback = true; toast('Still trying to find you…', 0) }
+      return locationRequest
+    }
+    const geo = navigator.geolocation
+    if (!geo) { toast('This browser cannot share its location. Move the map to your area instead.'); return Promise.resolve(null) }
+    locationFeedback = !quiet
+    const request = new Promise((resolve) => {
       if (!quiet) toast('Finding you…', 0)
       let done = false
-      // An unanswered permission prompt never calls back: do not leave "Finding you…" up forever.
-      const giveUp = setTimeout(() => { if (!done) { done = true; if (!quiet) toast(why({ code: 3 }), 12000); resolve(null) } }, 40000)
-      const got = (p) => {
+      let fallbackWatch = null
+      let fallbackTimer = null
+      let lastError = null
+      const cleanup = () => {
         clearTimeout(giveUp)
+        clearTimeout(fallbackTimer)
+        if (fallbackWatch !== null) geo.clearWatch(fallbackWatch)
+      }
+      // A location prompt or a phone's location provider can be slow to answer.
+      // Keep the request alive while a watch waits for the first usable fix.
+      const giveUp = setTimeout(() => finish(null, lastError || { code: 3 }), 65000)
+      const finish = (p, e) => {
+        if (done) return
         done = true
+        cleanup()
+        if (!p) {
+          if (e && e.code === 1) store.set('locOK', false)
+          if (locationFeedback || (e && e.code === 1)) toast(why(e), 12000)
+          resolve(null)
+          return
+        }
         const at = [p.coords.latitude, p.coords.longitude]
         placeMe(at, p.coords.accuracy)
         store.set('me', { lat: +at[0].toFixed(5), lon: +at[1].toFixed(5), at: Date.now() })
@@ -299,19 +322,40 @@
         refine()
         resolve(at)
       }
-      const fail = (e) => {
-        clearTimeout(giveUp)
-        if (done) return
-        done = true
-        if (e && e.code === 1) store.set('locOK', false)
-        if (!quiet || (e && e.code === 1)) toast(why(e), 12000)
-        resolve(null)
+      const got = (p) => {
+        finish(p)
       }
-      navigator.geolocation.getCurrentPosition(got, (e) => {
-        if (e.code === 1) return fail(e)
-        navigator.geolocation.getCurrentPosition(got, fail, { enableHighAccuracy: true, timeout: 25000, maximumAge: 0 })
-      }, { enableHighAccuracy: false, timeout: 10000, maximumAge: 10 * 60000 })
+      const waitForFix = (e) => {
+        lastError = e || lastError
+        if (e && e.code === 1) return finish(null, e)
+        if (!geo.watchPosition) return finish(null, lastError)
+        try {
+          fallbackWatch = geo.watchPosition(got, (watchError) => {
+            lastError = watchError || lastError
+            if (watchError && watchError.code === 1) finish(null, watchError)
+          }, { enableHighAccuracy: true, timeout: 30000, maximumAge: 0 })
+          fallbackTimer = setTimeout(() => finish(null, lastError), 25000)
+        } catch (watchError) {
+          finish(null, lastError || watchError)
+        }
+      }
+      const fail = (e) => {
+        lastError = e || lastError
+        if (e && e.code === 1) return finish(null, e)
+        try {
+          geo.getCurrentPosition(got, waitForFix, { enableHighAccuracy: true, timeout: 25000, maximumAge: 0 })
+        } catch (retryError) {
+          waitForFix(lastError || retryError)
+        }
+      }
+      try {
+        geo.getCurrentPosition(got, fail, { enableHighAccuracy: false, timeout: 10000, maximumAge: 10 * 60000 })
+      } catch (e) {
+        finish(null, e)
+      }
     })
+    locationRequest = request.finally(() => { locationRequest = null; locationFeedback = false })
+    return locationRequest
   }
   function refine() {
     if (watchId !== null || !navigator.geolocation.watchPosition) return
@@ -615,7 +659,7 @@ ${feeds.length ? `<ol class="feeds">${feeds.map((f) => `<li><a href="${esc(f.url
     if (!roomForPlace()) return
     status('Finding you…')
     const me = await locate({ fly: true })
-    if (!me) return status('Location is blocked. Use "Add the map\'s center" instead.')
+    if (!me) return status('Could not get your location. Check device and browser Location Services, or use "Add the map\'s center" instead.')
     state.places.push({ name: askPlaceName(state.places.length ? 'Place ' + (state.places.length + 1) : 'Home'), lat: +me[0].toFixed(5), lon: +me[1].toFixed(5), km: 1.6 })
     status('')
     savePlaces()
@@ -661,7 +705,7 @@ ${feeds.length ? `<ol class="feeds">${feeds.map((f) => `<li><a href="${esc(f.url
         status('Finding you, to add your first place…')
         const me = await locate({ fly: true })
         if (me) state.places.push({ name: 'Home', lat: +me[0].toFixed(5), lon: +me[1].toFixed(5), km: 1.6 })
-        else return status('Add a place first: allow location, or use "Add the map\'s center".')
+        else return status('Add a place first: check Location Services, or use "Add the map\'s center".')
         store.set('places', state.places)
         renderPlaces()
       }
