@@ -7,7 +7,7 @@
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.17.0",
         "@profullstack/affiliates": "^0.1.0",
-        "@profullstack/footer": "^0.2.5",
+        "@profullstack/footer": "latest",
         "@profullstack/hqtui": "^0.10.3",
         "@profullstack/redeem-credits": "^0.1.0",
         "@profullstack/webhooks": "0.2.1",
@@ -30,7 +30,7 @@
 
     "@profullstack/affiliates": ["@profullstack/affiliates@0.1.0", "", { "dependencies": { "@profullstack/referrals": "^0.1.0" }, "bin": { "affiliates": "dist/cli.js" } }, "sha512-cwr1n6ePFszP1UieelL3M1kb5INJ6bSG/BBwC13NhKYCYufU+MsEpTnDnpLMXF/jyZTe8IJBR2P1JJ0EmBU9og=="],
 
-    "@profullstack/footer": ["@profullstack/footer@0.2.5", "", { "peerDependencies": { "react": ">=18" }, "optionalPeers": ["react"], "bin": { "profullstack-footer": "bin/profullstack-footer.js" } }, "sha512-/CKwFP3m+qM0ZFTC9Rj11fgClutJzeYliX44Qp4qwrv2JgA/1k4tVOB3mhkPhaeckUhnfg5UyESDI1uoWr9c2w=="],
+    "@profullstack/footer": ["@profullstack/footer@0.6.11", "", { "peerDependencies": { "react": ">=18" }, "optionalPeers": ["react"], "bin": { "profullstack-footer": "bin/profullstack-footer.js" } }, "sha512-9khfQbBM2p5cqMqUg8+K1atF2muYWA0AQaVI6C8gH6Cl+D+7Wc2zeaPmtDMque8HZzA3tdaqoCAAUfsufaL17Q=="],
 
     "@profullstack/hqtui": ["@profullstack/hqtui@0.10.3", "", { "bin": { "hqtui": "bin/hqtui.mjs" } }, "sha512-Z2jaDqmiaGyrMy4JXOoPGCyEkei8l3tHoCbmT3/1gAWDl72ynPvMuHcUj+U97KgsF/CFIpZzzBYnYqcOq5e46g=="],
 
