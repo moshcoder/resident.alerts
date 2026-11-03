@@ -7,6 +7,7 @@
 import { createHash } from 'node:crypto'
 import { blockAddress, streetName, type Geocoder, type Place } from './geocode.js'
 import { EVACUATIONS, WILDFIRES } from './wildfire.js'
+import { BAY_AREA_SOURCES } from './bayarea.js'
 import { getJson, NWS, num, SEATTLE_FIRE, SF_POLICE, socrata, toIncident, USGS, valid, type Incident, type Kind, type Row, type Source } from './sources.js'
 
 const UA = 'resident.alerts/0.1 (+https://resident.alerts.pit.world; alerts@pit.world)'
@@ -240,6 +241,7 @@ export const SOURCES: Source[] = [
   HOUSTON_ACTIVE,
   SAN_DIEGO_FIRE,
   ORLANDO_POLICE,
+  ...BAY_AREA_SOURCES,
   NWS,
   USGS,
   WILDFIRES,
