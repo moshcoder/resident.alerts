@@ -450,6 +450,11 @@
       : `<li class="empty">Nothing reported here in the last ${state.hours === 1 ? 'hour' : state.hours === 168 ? 'week' : state.hours + ' hours'}.</li>`
     $('count').textContent = list.length + (list.length === 600 ? '+' : '') + ' incidents'
     $('hint').textContent = radius > 150 ? 'Zoomed out: showing notable and serious calls. Zoom in for everything.' : 'Calls come from the 911 feeds cities publish. Locations are approximate.'
+    // Santa Clara County publishes its fire and medical calls only through PulsePoint's own app.
+    const c = state.map.getCenter()
+    if (radius <= 150 && c.lat > 36.89 && c.lat < 37.49 && c.lng > -122.21 && c.lng < -121.2) {
+      $('hint').insertAdjacentHTML('beforeend', ' Fire and medical calls here are not published openly: <a href="https://web.pulsepoint.org/" target="_blank" rel="noopener">see them live on PulsePoint ↗</a>')
+    }
     chime(list.filter((i) => fresh.has(i.id)))
   }
 
