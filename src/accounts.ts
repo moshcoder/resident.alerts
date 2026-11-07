@@ -45,6 +45,8 @@ export class Accounts {
     // 0.5.0: CoinPay sign-in (unverified email kept aside) and "add your email" links.
     const ucols = (db.query('PRAGMA table_info(users)').all() as Row[]).map((c) => c.name)
     if (!ucols.includes('unverified_email')) db.exec('ALTER TABLE users ADD COLUMN unverified_email TEXT')
+    // 0.10.0: Profullstack Pass expiry (ms) CoinPay reported at the last CoinPay sign-in.
+    if (!ucols.includes('coinpay_pass_until')) db.exec('ALTER TABLE users ADD COLUMN coinpay_pass_until INTEGER')
     const lcols = (db.query('PRAGMA table_info(login_links)').all() as Row[]).map((c) => c.name)
     if (!lcols.includes('attach_user')) db.exec('ALTER TABLE login_links ADD COLUMN attach_user TEXT')
   }
@@ -176,15 +178,30 @@ export class Accounts {
   isAdmin(u: Pick<User, 'email'> | null) {
     return Boolean(u && this.admins.has(u.email))
   }
-  /** Premium on the account: an admin, a payment made while signed in, or an attached key. */
-  premium(cfg: PremiumConfig, u: User | null): boolean {
+  /**
+   * Premium on the account: an admin, a payment made while signed in, an attached
+   * key, or (unless withPass is false) a running Profullstack Pass. Buying or
+   * redeeming lifetime Premium asks with withPass false, so a pass never blocks it.
+   */
+  premium(cfg: PremiumConfig, u: User | null, withPass = true): boolean {
     if (!u) return false
     if (this.isAdmin(u)) return true
     if (this.db.query('SELECT 1 FROM payments WHERE user_id = ? AND paid_at IS NOT NULL').get(u.id)) return true
+    // A Profullstack Pass is Premium until it expires.
+    if (withPass && this.passUntil(u) !== null) return true
     for (const r of this.db.query('SELECT license_hash FROM user_licenses WHERE user_id = ?').all(u.id) as Row[]) {
       if (cfg.comp.has(r.license_hash) || this.db.query('SELECT 1 FROM payments WHERE license_hash = ? AND paid_at IS NOT NULL').get(r.license_hash)) return true
     }
     return false
+  }
+  /** Profullstack Pass expiry (ms) while it is still running, else null. */
+  passUntil(u: Pick<User, 'id'>, now = Date.now()): number | null {
+    const r = this.db.query('SELECT coinpay_pass_until AS t FROM users WHERE id = ?').get(u.id) as Row
+    return typeof r?.t === 'number' && r.t > now ? r.t : null
+  }
+  /** Remember the pass from a CoinPay sign-in; null clears it. */
+  setPassUntil(userId: string, until: number | null) {
+    this.db.query('UPDATE users SET coinpay_pass_until = ? WHERE id = ?').run(until, userId)
   }
   premiumSince(u: User): number | null {
     const r = this.db.query('SELECT MIN(paid_at) AS t FROM payments WHERE user_id = ? AND paid_at IS NOT NULL').get(u.id) as Row

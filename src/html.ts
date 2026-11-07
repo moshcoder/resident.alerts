@@ -377,6 +377,7 @@ export function premiumPage(ctx: Ctx, o: { chains: string[]; enabled: boolean; p
   <li><b>7 and 30 days</b> of history on the map and in the API (free: 24 hours)</li>
 </ul>
 <p class="muted">The live map, the radio, every kind of call and serious-only alerts stay free for everyone.</p>
+<p class="muted">Deposit $99 in your CoinPay wallet and get a free month: <a href="https://coinpayportal.com/pass" rel="noopener">CoinPay Pass</a> (Premium while it lasts, when you sign in with CoinPay).</p>
 ${o.error ? `<p class="error">${esc(o.error)}</p>` : ''}
 ${ctx.user?.premium ? `<p class="ok">★ Premium is on for ${esc(ctx.user.email)}. <a href="/account">Your account</a></p>` : o.needSignin && o.enabled ? `<p><a class="btn primary" href="/signin?next=/premium">Sign in to get Premium</a></p><p class="muted">Premium belongs to your account, so it follows you to every device and can never be lost with a browser. Signing in is just your email: we send a one-time link.</p>` : o.enabled
     ? `<form method="post" action="/premium" class="tipform">

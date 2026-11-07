@@ -11,7 +11,21 @@ import type { Database } from 'bun:sqlite'
 import { createHash, randomBytes } from 'node:crypto'
 
 export type OAuthConfig = { clientId: string; clientSecret: string; base: string } | null
-export type CoinPayProfile = { sub: string; email: string | null; name: string | null }
+export type CoinPayProfile = { sub: string; email: string | null; name: string | null; passUntil?: number | null }
+
+/**
+ * Profullstack Pass (2026-11-07): $99 deposited in the person's own CoinPay
+ * wallet is a free month on every Profullstack property. Userinfo reports it as
+ * `pass: { active, expires_at? }`. Active only when active === true and
+ * expires_at parses to a future date; anything else is no pass. Returns the
+ * expiry in ms, or null.
+ */
+export function passUntilFromUserinfo(info: unknown, now = Date.now()): number | null {
+  const p = (info as { pass?: { active?: unknown; expires_at?: unknown } } | null)?.pass
+  if (!p || typeof p !== 'object' || p.active !== true || typeof p.expires_at !== 'string') return null
+  const t = Date.parse(p.expires_at)
+  return Number.isFinite(t) && t > now ? t : null
+}
 
 export const STATE_MS = 10 * 60_000
 const b64url = (b: Buffer) => b.toString('base64url')
@@ -63,6 +77,6 @@ export class CoinPayOAuth {
     if (!sub) return { error: 'CoinPay did not say who you are. Try again.' }
     const email = typeof info?.email === 'string' && /@/.test(info.email) ? info.email.toLowerCase() : null
     const name = typeof info?.name === 'string' ? info.name : typeof info?.preferred_username === 'string' ? (info.preferred_username as string) : null
-    return { ...s, profile: { sub, email, name } }
+    return { ...s, profile: { sub, email, name, passUntil: passUntilFromUserinfo(info, this.now()) } }
   }
 }

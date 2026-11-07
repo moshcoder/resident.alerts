@@ -306,6 +306,8 @@ export function createApp(deps: Deps) {
         if ('error' in out) return fail(out.error)
         const r = acc.signInWithCoinPay(out.profile, out.linkUser)
         if ('error' in r) return fail(r.error)
+        // Profullstack Pass: Premium until it expires (Accounts.premium reads it).
+        acc.setPassUntil(r.user.id, out.profile.passUntil ?? null)
         if (out.linkUser) return c.redirect('/account?connected=1')
         await welcomeNew(c, r.user, r.created)
         setCookie(c, SESSION, acc.newSession(r.user.id), { httpOnly: true, secure: deps.secureCookies ?? https(c), sameSite: 'Lax', path: '/', maxAge: 180 * 86_400 })
@@ -445,7 +447,7 @@ export function createApp(deps: Deps) {
     const u = userOf(c)
     // Premium belongs to an account, so a lost browser never loses it.
     if (deps.accounts && !u) return c.redirect('/signin?next=/premium')
-    if (u && accountPremium(u)) return c.redirect('/account')
+    if (u && deps.accounts?.premium(deps.premium, u, false)) return c.redirect('/account')
     try {
       const out = await startPremium(deps.premium, store, { chain: String(f.chain ?? ''), successUrl: (key) => (u ? `${origin(c)}/account?paid=1` : `${RELAY_ORIGIN}/premium/k/${key}`), cancelUrl: `${origin(c)}/premium`, ...(u ? { userId: u.id } : {}) }, deps.fetch)
       return c.redirect(out.checkoutUrl)
