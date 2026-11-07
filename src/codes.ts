@@ -55,7 +55,7 @@ export class Codes {
    * `grant`), so the account page calls this first. True if it switched on.
    */
   async applyPremium(u: User): Promise<boolean> {
-    if (this.accounts.premium(this.premium, u)) return false
+    if (this.accounts.premium(this.premium, u, false)) return false
     if ((await this.credits.balance(u.id, PREMIUM_UNIT)) < 1) return false
     const spent = await this.credits.spend(u.id, PREMIUM_UNIT, 1, 'lifetime Premium switched on')
     if (!spent.ok) return false
@@ -71,7 +71,7 @@ export class Codes {
     const code = String(input ?? '').trim()
     if (!code) throw new CodeError('Type the code first.')
     // Someone who already has Premium keeps the code usable for a friend.
-    if (this.accounts.premium(this.premium, u)) throw new CodeError('You already have Premium. Pass the code on to someone who does not.')
+    if (this.accounts.premium(this.premium, u, false)) throw new CodeError('You already have Premium. Pass the code on to someone who does not.')
     const r = await this.credits.redeem(code, u.id)
     if (!r.ok) throw new CodeError(WHY[r.reason] ?? 'That code did not work.')
     if (r.grant.unit !== PREMIUM_UNIT) return `Added ${r.grant.amount} ${r.grant.unit}.`

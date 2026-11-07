@@ -17,9 +17,9 @@ afterAll(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })))
 
 /** A pretend CoinPay: checks the PKCE verifier against the challenge it was given, then says who you are. */
 function fakeCoinPay() {
-  const codes = new Map<string, { sub: string; email: string; challenge: string; redirect: string }>()
-  const tokens = new Map<string, { sub: string; email: string }>()
-  let who = { sub: 'cp-user-1', email: 'tony@example.com' }
+  const codes = new Map<string, { sub: string; email: string; pass?: unknown; challenge: string; redirect: string }>()
+  const tokens = new Map<string, { sub: string; email: string; pass?: unknown }>()
+  let who: { sub: string; email: string; pass?: unknown } = { sub: 'cp-user-1', email: 'tony@example.com' }
   const f = (async (url: string, init: any = {}) => {
     const u = new URL(url)
     if (u.pathname === '/api/oauth/token') {
@@ -34,7 +34,7 @@ function fakeCoinPay() {
     }
     if (u.pathname === '/api/oauth/userinfo') {
       const t = tokens.get(String(init.headers?.authorization ?? '').replace('Bearer ', ''))
-      return t ? Response.json({ sub: t.sub, email: t.email, email_verified: false }) : Response.json({}, { status: 401 })
+      return t ? Response.json({ sub: t.sub, email: t.email, email_verified: false, ...(t.pass ? { pass: t.pass } : {}) }) : Response.json({}, { status: 401 })
     }
     return new Response('nope', { status: 404 })
   }) as unknown as typeof fetch
@@ -45,7 +45,7 @@ function fakeCoinPay() {
     codes.set(code, { ...who, challenge: q.get('code_challenge')!, redirect: q.get('redirect_uri')! })
     return `/auth/coinpay/callback?code=${code}&state=${q.get('state')}`
   }
-  return { f, consent, as: (sub: string, email: string) => (who = { sub, email }) }
+  return { f, consent, as: (sub: string, email: string, pass?: unknown) => (who = { sub, email, ...(pass ? { pass } : {}) }) }
 }
 
 function setup() {
@@ -105,6 +105,16 @@ describe('sign in with CoinPay', () => {
     signOut()
     expect((await coinpaySignIn()).headers.get('location')).toBe('/')
     expect((await me()).display).toBe(a.display)
+  })
+  test('a Profullstack Pass at CoinPay sign-in is Premium until it expires; the next sign-in without one ends it', async () => {
+    const { coinpaySignIn, me, signOut, cp } = setup()
+    cp.as('cp-pass', 'pass@example.com', { active: true, expires_at: new Date(Date.now() + 30 * 86_400_000).toISOString() })
+    await coinpaySignIn()
+    expect((await me()).premium).toBe(true)
+    signOut()
+    cp.as('cp-pass', 'pass@example.com', { active: false })
+    await coinpaySignIn()
+    expect((await me()).premium).toBe(false)
   })
   test('a state is good once', async () => {
     const { req, cp } = setup()
