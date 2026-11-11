@@ -743,3 +743,35 @@ ${feeds.length ? `<ol class="feeds">${feeds.map((f) => `<li><a href="${esc(f.url
     } catch (e) { status(e.message) }
   })
 })()
+
+// WebMCP (@profullstack/webmcp, loaded in <head>): incidents_near for the AI agent in the
+// visitor's browser, over the open /api/v1/incidents. A no-op where the browser has no WebMCP.
+;(() => {
+  const register = () => {
+    const W = window.ProfullstackWebMCP
+    if (!W || !W.supported) return
+    W.registerTool({
+      name: 'incidents_near',
+      description: 'Live 911 incidents (police, fire, medical, traffic) and weather warnings near a point, newest first.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          lat: { type: 'number', description: 'Latitude' },
+          lon: { type: 'number', description: 'Longitude' },
+          km: { type: 'number', minimum: 0.1, maximum: 500, description: 'Radius in km (default 10)' },
+          hours: { type: 'number', minimum: 0.05, maximum: 24, description: 'How far back, in hours (default 24)' },
+          limit: { type: 'integer', minimum: 1, maximum: 300, description: 'Max incidents (default 50)' },
+        },
+        required: ['lat', 'lon'],
+      },
+      annotations: { readOnlyHint: true },
+      execute: async ({ lat, lon, km = 10, hours = 24, limit = 50 }) => {
+        const q = new URLSearchParams({ lat, lon, km, hours, limit })
+        const r = await fetch('/api/v1/incidents?' + q, { headers: { accept: 'application/json' } })
+        return r.json()
+      },
+    })
+  }
+  if (window.ProfullstackWebMCP && window.ProfullstackWebMCP.unregisterAll) register()
+  else document.addEventListener('webmcp:ready', register, { once: true })
+})()
