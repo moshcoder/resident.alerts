@@ -82,6 +82,7 @@ ${o.map ? `<script src="${LEAFLET_JS}" defer></script>` : ''}
 <script src="${COMMUNITY_URL}" defer></script>
 ${o.jsonLd ? `<script type="application/ld+json">${JSON.stringify(o.jsonLd).replace(/</g, '\\u003c')}</script>` : ''}
 ${TRACKER}
+<script type="module" data-webmcp src="https://cdn.jsdelivr.net/npm/@profullstack/webmcp@0/src/embed.js" data-pages="{&quot;map&quot;:&quot;/&quot;,&quot;radio&quot;:&quot;/radio&quot;,&quot;coverage&quot;:&quot;/coverage&quot;,&quot;premium&quot;:&quot;/premium&quot;,&quot;api&quot;:&quot;/api&quot;,&quot;about&quot;:&quot;/about&quot;}"></script>
 </head>
 <body class="${esc(o.bodyClass ?? '')}">
 ${RING_PLACEHOLDER}
