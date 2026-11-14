@@ -49,6 +49,8 @@ export class Accounts {
     if (!ucols.includes('coinpay_pass_until')) db.exec('ALTER TABLE users ADD COLUMN coinpay_pass_until INTEGER')
     const lcols = (db.query('PRAGMA table_info(login_links)').all() as Row[]).map((c) => c.name)
     if (!lcols.includes('attach_user')) db.exec('ALTER TABLE login_links ADD COLUMN attach_user TEXT')
+    // 0.11.0: the nickname picked on the sign-in form, set when the link makes the account.
+    if (!lcols.includes('nickname')) db.exec('ALTER TABLE login_links ADD COLUMN nickname TEXT')
   }
 
   // ---- links + sessions -----------------------------------------------------------
@@ -57,9 +59,9 @@ export class Accounts {
     return (this.db.query('SELECT COUNT(*) AS n FROM login_links WHERE email = ? AND created_at >= ?').get(email, sinceMs) as Row).n
   }
   /** A sign-in link. With `attachUser`, opening it proves the email for that (CoinPay-only) account instead. */
-  newLink(email: string, news: boolean, attachUser?: string): string {
+  newLink(email: string, news: boolean, attachUser?: string, nickname?: string | null): string {
     const token = rand()
-    this.db.query('INSERT INTO login_links (hash, email, news, created_at, attach_user) VALUES (?, ?, ?, ?, ?)').run(sha(token), email.toLowerCase(), news ? 1 : 0, this.now(), attachUser ?? null)
+    this.db.query('INSERT INTO login_links (hash, email, news, created_at, attach_user, nickname) VALUES (?, ?, ?, ?, ?, ?)').run(sha(token), email.toLowerCase(), news ? 1 : 0, this.now(), attachUser ?? null, nickname ?? null)
     this.db.query('DELETE FROM login_links WHERE created_at < ?').run(this.now() - 7 * 86_400_000)
     return token
   }
@@ -72,9 +74,10 @@ export class Accounts {
     return this.spendLink(token)?.user ?? null
   }
   /** takeLink, also saying whether this sign-in made the account (an invite only counts for a new one). */
-  spendLink(token: string): { user: User; created: boolean } | null {
+  spendLink(token: string): { user: User; created: boolean; nickname: string | null } | null {
     const h = sha(token)
-    const r = this.db.query('SELECT email, news, created_at, used_at, attach_user FROM login_links WHERE hash = ?').get(h) as Row | null
+    const r = this.db.query('SELECT email, news, created_at, used_at, attach_user, nickname FROM login_links WHERE hash = ?').get(h) as Row | null
+    const nickname = (r?.nickname as string | null) ?? null
     if (!r || r.used_at || this.now() - r.created_at > LINK_MS) return null
     if (this.db.query('UPDATE login_links SET used_at = ? WHERE hash = ? AND used_at IS NULL').run(this.now(), h).changes !== 1) return null
     const attach = r.attach_user ? this.user(r.attach_user) : null
@@ -83,14 +86,14 @@ export class Accounts {
       const owner = this.byEmail(r.email)
       if (owner) {
         this.mergeInto(attach.id, owner.id)
-        return owner.banned ? null : { user: this.user(owner.id)!, created: false }
+        return owner.banned ? null : { user: this.user(owner.id)!, created: false, nickname }
       }
       this.db.query('UPDATE users SET email = ?, news = ?, unverified_email = NULL WHERE id = ?').run(r.email, r.news ? 1 : 0, attach.id)
-      return { user: this.user(attach.id)!, created: false }
+      return { user: this.user(attach.id)!, created: false, nickname }
     }
     const created = !this.byEmail(r.email)
     const u = this.ensureUser(r.email, Boolean(r.news))
-    return u.banned ? null : { user: u, created }
+    return u.banned ? null : { user: u, created, nickname }
   }
   ensureUser(email: string, news = true): User {
     const e = email.toLowerCase()

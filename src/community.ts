@@ -196,6 +196,21 @@ export class Community {
     this.db.query('INSERT INTO resident_tokens (hash, resident_id, at) VALUES (?, ?, ?)').run(sha(token), existing.id, this.now())
     return { resident: this.resident(existing.id)!, token }
   }
+  /** The account's community name, or null before it has one. */
+  nameOf(userId: string): string | null {
+    return ((this.db.query('SELECT name FROM residents WHERE user_id = ?').get(userId) as Row | null)?.name as string | null) ?? null
+  }
+  /** Set (or make) the account's community name without handing out a browser token. */
+  setUserName(userId: string, name: string | null, ip: string): string {
+    const existing = this.db.query('SELECT id FROM residents WHERE user_id = ?').get(userId) as Row | null
+    if (existing) {
+      if (name) this.rename(existing.id, name)
+    } else {
+      const made = this.newResident(name, ip)
+      this.db.query('UPDATE residents SET user_id = ? WHERE id = ?').run(userId, made.resident.id)
+    }
+    return this.nameOf(userId)!
+  }
   userOf(residentId: string): string | null {
     return ((this.db.query('SELECT user_id FROM residents WHERE id = ?').get(residentId) as Row | null)?.user_id as string | null) ?? null
   }

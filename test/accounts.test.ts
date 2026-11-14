@@ -73,6 +73,31 @@ describe('accounts', () => {
     await req('/signout', { form: {} })
     expect((await req('/api/v1/account')).status).toBe(401)
   })
+  test('the nickname picked at sign-up is the account\'s community name, and /account changes it', async () => {
+    const { req, mail } = setup()
+    expect((await req('/signin', { form: { email: 'nick@example.com', nickname: 'Police Chief', next: '/' } })).status).toBe(400)
+    expect(mail).toHaveLength(0)
+    await req('/signin', { form: { email: 'nick@example.com', nickname: '  Hillside   Hank ', next: '/' } })
+    const link = mail.at(-1)!.text.match(/\/auth\/([A-Za-z0-9_-]+)/)![1]!
+    await req(`/auth/${link}`, { form: { next: '/' } })
+    expect(((await (await req('/api/v1/account')).json()) as any).nickname).toBe('Hillside Hank')
+    expect(await (await req('/account')).text()).toContain('Neighbors see you as <b>Hillside Hank</b>')
+    // Posting uses it without asking again.
+    const r = (await (await req('/api/v1/residents', { json: {} })).json()) as any
+    expect(r.resident.name).toBe('Hillside Hank')
+    expect((await req('/account', { form: { action: 'nickname', nickname: 'x' } })).status).toBe(400)
+    expect(await (await req('/account', { form: { action: 'nickname', nickname: 'Creek Watcher' } })).text()).toContain('Your nickname is Creek Watcher.')
+    expect(((await (await req('/api/v1/residents/me', { headers: { authorization: `Bearer ${r.token}` } })).json()) as any).name).toBe('Creek Watcher')
+  })
+  test('a new account without a nickname gets a Neighbor name; signing in again never renames it', async () => {
+    const { req, signIn, mail } = setup()
+    await signIn('plain@example.com')
+    const first = ((await (await req('/api/v1/account')).json()) as any).nickname
+    expect(first).toMatch(/^Neighbor \d{4}$/)
+    await req('/signin', { form: { email: 'plain@example.com', nickname: 'Someone Else', next: '/' } })
+    await req(`/auth/${mail.at(-1)!.text.match(/\/auth\/([A-Za-z0-9_-]+)/)![1]!}`, { form: { next: '/' } })
+    expect(((await (await req('/api/v1/account')).json()) as any).nickname).toBe(first)
+  })
   test('a cross-site request never acts as you', async () => {
     const { req, signIn } = setup()
     await signIn('tony@example.com')
