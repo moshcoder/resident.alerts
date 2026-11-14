@@ -52,8 +52,7 @@ h2 { font-size: 1.15rem; margin: 1.8em 0 .5em; }
 .btn:disabled { opacity: .5; cursor: default; }
 .row { display: flex; align-items: center; gap: .6rem; }
 .row.wrap { flex-wrap: wrap; }
-.chips { display: flex; gap: .4rem; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
-.chips::-webkit-scrollbar { display: none; }
+.chips { display: flex; flex-wrap: wrap; gap: .4rem; padding-bottom: 2px; }
 .chip { flex: none; border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 999px; padding: .3rem .65rem; font: inherit; font-size: .82rem; cursor: pointer; white-space: nowrap; }
 .chip.on { color: var(--text); background: var(--panel2); border-color: #3a414d; }
 select, input[type=text], input[type=number] { font: inherit; color: var(--text); background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; padding: .3rem .5rem; }
