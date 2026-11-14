@@ -405,7 +405,7 @@ export function premiumKeyPage(ctx: Ctx, o: { key: string; paid: boolean; price:
   return layout({ title: 'Your Premium key · resident.alerts', description: 'Your resident.alerts Premium key.', path: '/premium', noindex: true, body, ctx })
 }
 
-export function signinPage(ctx: Ctx, o: { next: string; error?: string; sent?: string; email?: string }): string {
+export function signinPage(ctx: Ctx, o: { next: string; error?: string; sent?: string; email?: string; nickname?: string }): string {
   const body = o.sent
     ? `<h1>Check your email</h1>
 <p class="lede">We sent a sign-in link to <b>${esc(o.sent)}</b>. It works once, for 20 minutes.</p>
@@ -418,6 +418,7 @@ ${ctx.coinpay ? `<p><a class="btn coinpay" href="/auth/coinpay/start?next=${esc(
 <form method="post" action="/signin" class="signin">
   <input type="hidden" name="next" value="${esc(o.next)}">
   <label>Email<input type="email" name="email" required autocomplete="email" inputmode="email" value="${esc(o.email ?? '')}" placeholder="you@example.com"></label>
+  <label>Nickname <span class="muted">(new accounts; what neighbors see when you post. Blank = "Neighbor 1234")</span><input type="text" name="nickname" maxlength="30" autocomplete="nickname" spellcheck="false" value="${esc(o.nickname ?? '')}" placeholder="e.g. Hillside Hank"></label>
   <label class="check"><input type="checkbox" name="news" value="1" checked> Send me occasional updates about resident.alerts (a few a year; unsubscribe any time)</label>
   <button class="btn primary">Email me a sign-in link</button>
 </form>`
@@ -432,7 +433,7 @@ export function confirmSigninPage(ctx: Ctx, o: { token: string; next: string; ok
   return layout({ title: 'Sign in · resident.alerts', description: 'Finish signing in.', path: '/signin', noindex: true, body, ctx })
 }
 
-export function accountPage(ctx: Ctx, o: { email: string; verified: boolean; suggestEmail: string; coinpay: boolean; coinpayOn: boolean; premium: boolean; since: number | null; news: boolean; places: number; price: string; flash?: string; error?: string; webhooks?: PublicEndpoint[]; apiKeySince?: number | null; apiKey?: string; webhookSecret?: string }): string {
+export function accountPage(ctx: Ctx, o: { email: string; verified: boolean; suggestEmail: string; coinpay: boolean; coinpayOn: boolean; premium: boolean; since: number | null; news: boolean; places: number; price: string; nickname?: string | null; flash?: string; error?: string; webhooks?: PublicEndpoint[]; apiKeySince?: number | null; apiKey?: string; webhookSecret?: string }): string {
   const body = `<h1>Your account</h1>
 ${o.flash ? `<p class="ok">${esc(o.flash)}</p>` : ''}${o.error ? `<p class="error">${esc(o.error)}</p>` : ''}
 <p class="lede">${esc(o.email)}</p>
@@ -444,6 +445,11 @@ ${o.flash ? `<p class="ok">${esc(o.flash)}</p>` : ''}${o.error ? `<p class="erro
 <form method="post" action="/account" class="row wrap"><input type="hidden" name="action" value="key"><input type="text" name="key" placeholder="Have a Premium key? ra_…" autocomplete="off" spellcheck="false" aria-label="Premium key"><button class="btn">Attach it</button></form>
 <form method="post" action="/account" class="row wrap"><input type="hidden" name="action" value="redeem"><input type="text" name="code" placeholder="Have a code? CR-XXXX-XXXX-XXXX-XXXX" autocomplete="off" spellcheck="false" aria-label="Credit code"><button class="btn">Redeem</button></form>`}
 </section>
+${o.nickname !== null && o.nickname !== undefined ? `<section class="card" id="nickname">
+  <h2>Nickname</h2>
+  <p>${o.nickname ? `Neighbors see you as <b>${esc(o.nickname)}</b> on comments, chat and reports.` : 'Pick the name neighbors see on your comments, chat and reports.'}</p>
+  <form method="post" action="/account" class="row wrap"><input type="hidden" name="action" value="nickname"><input type="text" name="nickname" required minlength="2" maxlength="30" autocomplete="nickname" spellcheck="false" value="${esc(o.nickname)}" placeholder="e.g. Hillside Hank" aria-label="Nickname"><button class="btn${o.nickname ? '' : ' primary'}">${o.nickname ? 'Change' : 'Save'}</button></form>
+</section>` : ''}
 <section class="card">
   <h2>Invites</h2>
   <p>You have a few single-use invite links to give to people you think would want this. <a href="/invites">Your invites</a></p>

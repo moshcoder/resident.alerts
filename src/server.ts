@@ -20,7 +20,7 @@ import { CoinPayOAuth, oauthConfig } from './coinpay-oauth.js'
 import { CodeError, Codes, INVITE_CODE, REF_CODE } from './codes.js'
 import { SOURCES } from './cities.js'
 import { chpSource } from './chp.js'
-import { Community } from './community.js'
+import { cleanName, Community } from './community.js'
 import { mountCommunity } from './community-routes.js'
 import { cleanKinds, cleanPlaces, MAX_PLACES, Store } from './db.js'
 import { Geocoder } from './geocode.js'
@@ -184,6 +184,14 @@ export function createApp(deps: Deps) {
     if (ref && created) await codes.affiliates.attribute(ref, u.id).catch(() => null)
   }
 
+  /** A new account gets its community name now: the one picked on the sign-in form, else "Neighbor 1234". An existing name is never overwritten here. */
+  const giveNickname = (c: Context, u: User, created: boolean, nickname: string | null) => {
+    const cm = deps.community
+    if (!cm || cm.nameOf(u.id) || (!created && !nickname)) return
+    cm.setUserName(u.id, nickname, ip(c))
+  }
+  const NAME_RULE = 'Nicknames are 2 to 30 letters, numbers, spaces, . _ \' -, and cannot claim to be official.'
+
   app.use('*', async (c, next) => {
     // Forms only from our own pages: a cross-site POST is refused before it reaches a handler.
     if (c.req.method === 'POST' && !c.req.path.startsWith('/api/') && !c.req.path.startsWith('/hooks/') && c.req.header('sec-fetch-site') === 'cross-site') {
@@ -269,9 +277,12 @@ export function createApp(deps: Deps) {
       const email = String(f.email ?? '').trim().toLowerCase()
       const next = safeNext(f.next)
       const news = f.news === '1'
-      if (!EMAIL.test(email)) return page(c, signinPage(ctxOf(c), { next, error: 'That does not look like an email address.', email }), 400)
-      if (!signinLimit.allow(`ip:${ip(c)}`) || acc.linksSince(email, Date.now() - 60 * 60_000) >= 5) return page(c, signinPage(ctxOf(c), { next, error: 'Too many sign-in emails. Try again in an hour.', email }), 429)
-      const t = acc.newLink(email, news)
+      const nick = String(f.nickname ?? '').trim()
+      const nickname = nick ? cleanName(nick) : null
+      if (!EMAIL.test(email)) return page(c, signinPage(ctxOf(c), { next, error: 'That does not look like an email address.', email, nickname: nick }), 400)
+      if (nick && !nickname) return page(c, signinPage(ctxOf(c), { next, error: NAME_RULE, email, nickname: nick }), 400)
+      if (!signinLimit.allow(`ip:${ip(c)}`) || acc.linksSince(email, Date.now() - 60 * 60_000) >= 5) return page(c, signinPage(ctxOf(c), { next, error: 'Too many sign-in emails. Try again in an hour.', email, nickname: nick }), 429)
+      const t = acc.newLink(email, news, undefined, nickname)
       const sent = deps.mail ? await deps.mail({ to: email, subject: 'Your resident.alerts sign-in link', text: `Sign in to resident.alerts:\n\n${origin(c)}/auth/${t}?next=${encodeURIComponent(next)}\n\nIt works once, for 20 minutes. If you didn't ask for this, ignore it.\n` }) : false
       if (!sent) return page(c, signinPage(ctxOf(c), { next, error: 'We could not send the email just now. Try again in a minute.', email }), 502)
       return page(c, signinPage(ctxOf(c), { next, sent: email }))
@@ -286,6 +297,7 @@ export function createApp(deps: Deps) {
       const got = acc.spendLink(c.req.param('token'))
       if (!got) return page(c, confirmSigninPage(ctxOf(c), { token: '', next: '/account', ok: false }), 400)
       const u = got.user
+      giveNickname(c, u, got.created, got.nickname)
       await welcomeNew(c, u, got.created)
       setCookie(c, SESSION, acc.newSession(u.id), { httpOnly: true, secure: deps.secureCookies ?? https(c), sameSite: 'Lax', path: '/', maxAge: 180 * 86_400 })
       return c.redirect(safeNext(f.next))
@@ -309,6 +321,7 @@ export function createApp(deps: Deps) {
         // Profullstack Pass: Premium until it expires (Accounts.premium reads it).
         acc.setPassUntil(r.user.id, out.profile.passUntil ?? null)
         if (out.linkUser) return c.redirect('/account?connected=1')
+        giveNickname(c, r.user, r.created, null)
         await welcomeNew(c, r.user, r.created)
         setCookie(c, SESSION, acc.newSession(r.user.id), { httpOnly: true, secure: deps.secureCookies ?? https(c), sameSite: 'Lax', path: '/', maxAge: 180 * 86_400 })
         return c.redirect(r.created ? '/account?welcome=1' : safeNext(out.next))
@@ -322,7 +335,7 @@ export function createApp(deps: Deps) {
     const accountView = async (c: Context, u: User, extra: { flash?: string; error?: string; apiKey?: string; webhookSecret?: string } = {}, status = 200) => {
       c.header('cache-control', 'no-store')
       const webhooks = hooks ? { webhooks: await hooks.listEndpoints(u.id), apiKeySince: acc.apiKeySince(u.id) } : {}
-      return page(c, accountPage(ctxOf(c), { email: displayEmail(u), verified: hasEmail(u), suggestEmail: u.unverified_email ?? '', coinpay: acc.identities(u.id).some((i) => i.provider === 'coinpay'), coinpayOn: Boolean(deps.oauth), premium: accountPremium(u), since: acc.premiumSince(u), news: Boolean(u.news), places: u.places.length, price: PRICE, ...webhooks, ...extra }), status)
+      return page(c, accountPage(ctxOf(c), { email: displayEmail(u), verified: hasEmail(u), suggestEmail: u.unverified_email ?? '', coinpay: acc.identities(u.id).some((i) => i.provider === 'coinpay'), coinpayOn: Boolean(deps.oauth), premium: accountPremium(u), since: acc.premiumSince(u), news: Boolean(u.news), places: u.places.length, price: PRICE, nickname: deps.community ? (deps.community.nameOf(u.id) ?? '') : null, ...webhooks, ...extra }), status)
     }
     app.get('/account', async (c) => {
       const u = userOf(c)
@@ -330,7 +343,7 @@ export function createApp(deps: Deps) {
       // Premium credits granted from outside a redemption (the redeem-credits CLI) switch on here.
       if (codes) await codes.applyPremium(u)
       const q = c.req.query()
-      const flash = q.paid ? 'Payment sent. Premium switches on as soon as CoinPay confirms it (usually a minute or two), and we email you a receipt.' : q.connected ? 'CoinPay is connected: you can sign in with it from now on.' : q.welcome && !hasEmail(u) ? 'Signed in with CoinPay. Add your email below to get receipts and keep your account if you ever lose CoinPay access.' : ''
+      const flash = q.welcome && hasEmail(u) ? 'Welcome! Your account is ready.' : q.paid ? 'Payment sent. Premium switches on as soon as CoinPay confirms it (usually a minute or two), and we email you a receipt.' : q.connected ? 'CoinPay is connected: you can sign in with it from now on.' : q.welcome && !hasEmail(u) ? 'Signed in with CoinPay. Add your email below to get receipts and keep your account if you ever lose CoinPay access.' : ''
       return accountView(c, u, flash ? { flash } : {})
     })
     app.post('/account', async (c) => {
@@ -338,6 +351,13 @@ export function createApp(deps: Deps) {
       if (!u) return c.redirect('/signin?next=/account')
       const f = (await c.req.parseBody()) as Record<string, string>
       switch (f.action) {
+        case 'nickname': {
+          if (!deps.community) return c.redirect('/account')
+          const nickname = cleanName(f.nickname)
+          if (!nickname) return accountView(c, u, { error: NAME_RULE }, 400)
+          deps.community.setUserName(u.id, nickname, ip(c))
+          return accountView(c, u, { flash: `Your nickname is ${nickname}.` })
+        }
         case 'news':
           acc.setNews(u.id, f.news === '1')
           return accountView(c, acc.user(u.id)!, { flash: f.news === '1' ? 'You will get occasional updates.' : 'No more updates. Sign-in links and receipts still arrive.' })
@@ -636,7 +656,7 @@ export function createApp(deps: Deps) {
   api.get('/account', (c) => {
     const u = userOf(c)
     if (!u) return c.json({ signed_in: false }, 401)
-    return c.json({ signed_in: true, email: hasEmail(u) ? u.email : null, display: displayEmail(u), premium: accountPremium(u), places: u.places, news: Boolean(u.news), coinpay: deps.accounts!.identities(u.id).some((i) => i.provider === 'coinpay') })
+    return c.json({ signed_in: true, email: hasEmail(u) ? u.email : null, display: displayEmail(u), premium: accountPremium(u), places: u.places, news: Boolean(u.news), nickname: deps.community?.nameOf(u.id) ?? null, coinpay: deps.accounts!.identities(u.id).some((i) => i.provider === 'coinpay') })
   })
   // A key this browser kept from before it signed in joins the account.
   api.post('/account/key', async (c) => {

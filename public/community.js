@@ -47,7 +47,8 @@
       if (confirm('Sign in with your email to post, comment and share photos. It takes a minute: we email you a one-time link. Go to sign in?')) location.href = '/signin?next=' + encodeURIComponent(location.pathname + location.search)
       return false
     }
-    const name = prompt('Pick a name neighbors will see (or leave it blank for "Neighbor 1234"):', ls.get('name', '') || '')
+    // The nickname on the account (set at sign-up or on /account) is used as is; only an account without one is asked.
+    const name = account.nickname ? '' : prompt('Pick a name neighbors will see (or leave it blank for "Neighbor 1234"):', ls.get('name', '') || '')
     if (name === null) return false
     try {
       const r = await api('/residents', { method: 'POST', json: { name: name.trim() } })
@@ -56,6 +57,9 @@
       return true
     } catch (e) { alert(e.message); return false }
   }
+
+  // A nickname changed on /account replaces the one this browser remembered.
+  if (token()) api('/residents/me').then((r) => { if (r && r.name) ls.set('name', r.name) }).catch(() => {})
 
   // ---- uploads -------------------------------------------------------------------
   // Photos are redrawn on a canvas before upload: that drops EXIF (and the GPS in it).
